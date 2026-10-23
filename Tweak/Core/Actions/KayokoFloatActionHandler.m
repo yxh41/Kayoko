@@ -74,6 +74,9 @@ static NSString *const kKayokoFloatLogPath = @"/var/mobile/Library/com.82flex.ka
                            image:(UIImage *)image
                             rect:(CGRect)rect
                           center:(CGPoint)center;
++ (NSUInteger)argumentCountForSelector:(SEL)selector;
++ (nullable NSString *)signatureDescriptionForSelector:(SEL)selector onTarget:(id)target;
++ (void)fallBackToHistoryWithImage:(UIImage *)image target:(KayokoFloatTarget)target;
 + (BOOL)isCGRectArgumentType:(const char *)argumentType;
 + (BOOL)isCGPointArgumentType:(const char *)argumentType;
 
@@ -265,18 +268,33 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
 
     KayokoFloatTarget target = [self target];
 
-    // Both hosts can be handed the UIImage itself, which is the only way to end
-    // up with exactly the tapped item. That path is tried first and, once it
-    // reports success, the history file is never touched.
-    BOOL floated = target == KayokoFloatTargetShellX ? [self floatWithShellXInMemory:image]
-                                                    : [self floatWithSnapper3InMemory:image];
-    if (floated) {
+    if (target == KayokoFloatTargetSnapper3) {
+        // Both hosts can be handed the UIImage itself, which is the only way to
+        // end up with exactly the tapped item.
+        if ([self floatWithSnapper3InMemory:image]) {
+            return;
+        }
+
+        [self fallBackToHistoryWithImage:image target:target];
         return;
     }
 
-    // Last resort: drop the picture into the host's history folder and ask it to
-    // reopen "the last one". That is a date comparison rather than a direct
-    // hand-off, so it is only reached when the in-memory call was unavailable.
+    // ShellX builds a window of its own, and asking it to do that synchronously
+    // from inside a swipe action leaves SpringBoard mid-gesture and mid-dismissal.
+    // One clean runloop turn later there is nothing left to unwind.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if ([self floatWithShellXInMemory:image]) {
+            return;
+        }
+
+        [self fallBackToHistoryWithImage:image target:KayokoFloatTargetShellX];
+    });
+}
+
+/// Last resort: drop the picture into the host's history folder and ask it to
+/// reopen "the last one". That is a date comparison rather than a direct
+/// hand-off, so it is only reached when the in-memory call was unavailable.
++ (void)fallBackToHistoryWithImage:(UIImage *)image target:(KayokoFloatTarget)target {
     NSString *directory = [self historyDirectoryForTarget:target];
     if ([directory length] == 0) {
         KayokoFloatLog(@"fallback", @"no history directory");
@@ -462,7 +480,8 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     NSUInteger afterCount = [self countForKey:@"floatingWindows" onTarget:manager];
     NSUInteger visibleAfter = [self visibleFloatingWindowCount];
     KayokoFloatLog(@"shellx",
-                   [NSString stringWithFormat:@"invoked=%d windows %lu->%lu visible %lu->%lu frame=%@", invoked,
+                   [NSString stringWithFormat:@"%@ invoked=%d windows %lu->%lu visible %lu->%lu frame=%@",
+                                              NSStringFromClass([manager class]), invoked,
                                               (unsigned long)beforeCount, (unsigned long)afterCount,
                                               (unsigned long)visibleBefore, (unsigned long)visibleAfter,
                                               NSStringFromCGRect(frame)]);
@@ -707,6 +726,59 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
 
 #pragma mark - Reflection helpers
 
+/// `showFloatingImage:frame:` is two parameters, so the signature has four
+/// arguments: self, _cmd and the two. Hard-coding a count is how 4.3.8 and 4.3.9
+/// managed to refuse every single call while reporting a clean run, so the count
+/// is derived from the selector instead: one colon per parameter, plus two.
++ (NSUInteger)argumentCountForSelector:(SEL)selector {
+    if (!selector) {
+        return 0;
+    }
+
+    const char *name = sel_getName(selector);
+    if (!name) {
+        return 0;
+    }
+
+    NSUInteger colons = 0;
+    for (const char *cursor = name; *cursor != '\0'; cursor++) {
+        if (*cursor == ':') {
+            colons += 1;
+        }
+    }
+
+    return colons + 2;
+}
+
+/// Prints `selector -> ret / argc / [arg types]`, which is what makes a refusal
+/// explainable after the fact instead of a silent zero in the log.
++ (nullable NSString *)signatureDescriptionForSelector:(SEL)selector onTarget:(id)target {
+    if (!selector) {
+        return nil;
+    }
+
+    NSString *name = NSStringFromSelector(selector);
+    if (!target || ![target respondsToSelector:selector]) {
+        return [NSString stringWithFormat:@"%@ -> not implemented by %@", name,
+                                          target ? NSStringFromClass([target class]) : @"nil"];
+    }
+
+    NSMethodSignature *signature = [target methodSignatureForSelector:selector];
+    if (!signature) {
+        return [NSString stringWithFormat:@"%@ -> no signature", name];
+    }
+
+    NSMutableArray<NSString *> *types = [NSMutableArray array];
+    for (NSUInteger index = 2; index < [signature numberOfArguments]; index++) {
+        const char *type = [signature getArgumentTypeAtIndex:index];
+        [types addObject:type ? [NSString stringWithUTF8String:type] : @"?"];
+    }
+
+    return [NSString stringWithFormat:@"%@ -> %s / %lu / [%@]", name, [signature methodReturnType],
+                                      (unsigned long)[signature numberOfArguments],
+                                      [types componentsJoinedByString:@", "]];
+}
+
 /// CGRect arrives as `{CGRect={CGPoint=dd}{CGSize=dd}}`, so the check is a prefix
 /// match on the struct name rather than an exact string compare.
 + (BOOL)isCGRectArgumentType:(const char *)argumentType {
@@ -735,7 +807,8 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     }
 
     NSMethodSignature *signature = [target methodSignatureForSelector:selector];
-    if (!signature || [signature numberOfArguments] != 3) {
+    if (!signature || [signature numberOfArguments] != [self argumentCountForSelector:selector]) {
+        KayokoFloatLog(@"reflect", [self signatureDescriptionForSelector:selector onTarget:target]);
         return NO;
     }
 
@@ -748,6 +821,7 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     BOOL imageFirst = secondType[0] == '@' && [self isCGRectArgumentType:thirdType];
     BOOL rectFirst = [self isCGRectArgumentType:secondType] && thirdType[0] == '@';
     if (!imageFirst && !rectFirst) {
+        KayokoFloatLog(@"reflect", [self signatureDescriptionForSelector:selector onTarget:target]);
         return NO;
     }
 
@@ -779,7 +853,8 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     }
 
     NSMethodSignature *signature = [target methodSignatureForSelector:selector];
-    if (!signature || [signature numberOfArguments] != 4) {
+    if (!signature || [signature numberOfArguments] != [self argumentCountForSelector:selector]) {
+        KayokoFloatLog(@"reflect", [self signatureDescriptionForSelector:selector onTarget:target]);
         return NO;
     }
 
@@ -788,6 +863,7 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     const char *centerType = [signature getArgumentTypeAtIndex:4];
     if (!imageType || imageType[0] != '@' || ![self isCGRectArgumentType:rectType] ||
         ![self isCGPointArgumentType:centerType]) {
+        KayokoFloatLog(@"reflect", [self signatureDescriptionForSelector:selector onTarget:target]);
         return NO;
     }
 
