@@ -76,6 +76,9 @@ static NSString *const kKayokoFloatLogPath = @"/var/mobile/Library/com.82flex.ka
 + (NSUInteger)visibleFloatingWindowCount;
 
 + (BOOL)isFloatingWindow:(UIWindow *)window;
++ (BOOL)class:(Class)classObject declaresSelector:(SEL)selector;
++ (NSDictionary<NSString *, NSValue *> *)suppressKeyEligibilityForClass:(Class)classObject;
++ (void)restoreKeyEligibilityForClass:(Class)classObject saved:(NSDictionary<NSString *, NSValue *> *)saved;
 + (nullable UIWindow *)keyWindowInWindows:(NSArray<UIWindow *> *)windows excludingFloating:(BOOL)excludingFloating;
 + (BOOL)windowCanBecomeKey:(UIWindow *)window;
 + (BOOL)restoreKeyWindow:(UIWindow *)window;
@@ -472,6 +475,31 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
                                          (__bridge CFStringRef)notificationName, NULL, NULL, YES);
 }
 
+#pragma mark - ShellX key eligibility
+
+/// `makingKeyWindow` is the whole problem with ShellX. `SSFloatingWindow`
+/// overrides both `-canBecomeKeyWindow` and `-_canBecomeKeyWindow` to say yes,
+/// and `SSFloatingManager` raises the new window with `-makeKeyAndVisible`. Three
+/// observations, in order, pinned it down:
+///
+///   4.3.10  let it keep key            -> the float stayed, the screen stopped
+///                                         taking touches until a respring.
+///   4.3.11  take key back afterwards   -> the float resigned key and vanished,
+///                                         and the screen still died.
+///
+/// So it is not "who ends up with key", it is the hand-over itself: the moment
+/// key moves off SpringBoard's home-screen window and back, the float window is
+/// torn down and touch routing does not come back. The only exit is to never let
+/// key move in the first place - which is what this stub does, for the duration
+/// of one synchronous call. Returning NO here makes `-makeKeyAndVisible` show the
+/// window without making it key, so nothing is ever handed over and nothing is
+/// ever taken back.
+static BOOL KayokoFloatKeySuppressor(id self, SEL _cmd) {
+    (void)self;
+    (void)_cmd;
+    return NO;
+}
+
 #pragma mark - ShellX in-memory hand-off
 
 /// `SSFloatingManager` is a singleton behind the *class* method `+shared`. That
@@ -479,15 +507,8 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
 /// so `-showFloatingImage:frame:` runs against a manager that keeps no record of
 /// the window and the picture never shows up.
 ///
-/// The key window is the other trap. `SSFloatingWindow` overrides both
-/// `-canBecomeKeyWindow` and `-_canBecomeKeyWindow`, and the manager raises the
-/// new window with `-makeKeyAndVisible`; ShellX gets away with it because its
-/// own flow always ends by closing the float, and closing it is what hands key
-/// back. We never close it, so key would stay with a small window that has no
-/// business routing touches, the screen would still draw but stop responding,
-/// and only a respring would clear it. Taking key back right after the call is
-/// therefore not cosmetic - it is the difference between "floats an image" and
-/// "freezes the device".
+/// The call itself is wrapped in the key suppression above, because the window it
+/// builds would otherwise take key away from SpringBoard and wedge touch input.
 + (BOOL)floatWithShellXInMemory:(UIImage *)image {
     Class managerClass = objc_getClass([kKayokoShellXFloatingManagerClassName UTF8String]);
     if (!managerClass) {
@@ -501,6 +522,7 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
         return NO;
     }
 
+    Class floatClass = objc_getClass([kKayokoShellXFloatingWindowClassName UTF8String]);
     NSArray<UIWindow *> *windowsBefore = [self applicationWindows];
     NSString *keyBefore = [self keyWindowDescriptionInWindows:windowsBefore];
     UIWindow *keyWindowBefore = [self keyWindowInWindows:windowsBefore excludingFloating:YES];
@@ -509,6 +531,7 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     NSUInteger visibleBefore = [self visibleFloatingWindowCount];
     CGRect frame = [self floatingFrameForImage:image];
 
+    NSDictionary<NSString *, NSValue *> *savedKeyMethods = [self suppressKeyEligibilityForClass:floatClass];
     BOOL invoked = [self invokeRectSelector:NSSelectorFromString(@"showFloatingImage:frame:")
                                    onTarget:manager
                                       image:image
@@ -520,23 +543,23 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
                                       rect:frame];
     }
 
-    // Read the float's state before handing key back, otherwise the interesting
-    // part - whether it took key at all - is already gone by the time we log.
     NSString *floatDescription = [self floatingWindowDescriptionInWindows:[self applicationWindows]];
+    [self restoreKeyEligibilityForClass:floatClass saved:savedKeyMethods];
 
-    // Twice: `-makeKeyAndVisible` is synchronous inside the manager, so the
-    // first call is the one that matters, but ShellX also re-raises the window
-    // from a `dispatch_async` in some builds. The second call is a no-op once
-    // key is already back where it belongs.
-    [self ensureKeyWindow:keyWindowBefore];
-    UIWindow *keyWindowArgument = keyWindowBefore;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        [self ensureKeyWindow:keyWindowArgument];
-    });
+    // Safety net only. With suppression in place key should never have moved, so
+    // this normally does nothing at all; it exists for the case where the
+    // selectors were named differently in a future build, because a screen that
+    // is already frozen is far worse than a window that briefly held key.
+    NSString *keyAfterCall = [self keyWindowDescriptionInWindows:[self applicationWindows]];
+    if (![self keyWindowInWindows:[self applicationWindows] excludingFloating:YES]) {
+        [self ensureKeyWindow:keyWindowBefore];
+        keyAfterCall = [self keyWindowDescriptionInWindows:[self applicationWindows]];
+        KayokoFloatLog(@"shellx", @"key was taken during the call, restored");
+    }
 
     NSUInteger afterCount = [self countForKey:@"floatingWindows" onTarget:manager];
     NSUInteger visibleAfter = [self visibleFloatingWindowCount];
-    NSString *keyAfter = [self keyWindowDescriptionInWindows:[self applicationWindows]];
+    NSString *keyAfter = keyAfterCall;
     KayokoFloatLog(@"shellx",
                    [NSString stringWithFormat:@"%@ invoked=%d windows %lu->%lu visible %lu->%lu frame=%@ key %@->%@ "
                                               @"float=%@",
@@ -544,6 +567,22 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
                                               (unsigned long)beforeCount, (unsigned long)afterCount,
                                               (unsigned long)visibleBefore, (unsigned long)visibleAfter,
                                               NSStringFromCGRect(frame), keyBefore, keyAfter, floatDescription]);
+
+    // Three samples, because the failure that matters is a freeze: the last line
+    // that made it into the file is the moment the device stopped, and the float
+    // state at each step says whether it vanished before or after that.
+    for (NSNumber *delay in @[ @0.15, @0.7, @1.6 ]) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)([delay doubleValue] * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+                           KayokoFloatLog(@"shellx watch",
+                                          [NSString stringWithFormat:@"t=%.2fs float=%@ key=%@",
+                                                                     [delay doubleValue],
+                                                                     [self floatingWindowDescriptionInWindows:
+                                                                               [self applicationWindows]],
+                                                                     [self keyWindowDescriptionInWindows:
+                                                                               [self applicationWindows]]]);
+                       });
+    }
 
     return afterCount > beforeCount || visibleAfter > visibleBefore;
 }
@@ -714,6 +753,73 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     }
 
     return [window isKindOfClass:windowClass];
+}
+
+/// Whether `classObject` declares `selector` itself rather than inheriting it.
+/// This distinction is load-bearing: swapping an inherited implementation would
+/// rewrite `UIWindow` for every window in the process, which is not ours to
+/// change.
++ (BOOL)class:(Class)classObject declaresSelector:(SEL)selector {
+    unsigned int count = 0;
+    Method *methods = class_copyMethodList(classObject, &count);
+    if (!methods) {
+        return NO;
+    }
+
+    BOOL found = NO;
+    for (unsigned int index = 0; index < count; index++) {
+        if (method_getName(methods[index]) == selector) {
+            found = YES;
+            break;
+        }
+    }
+
+    free(methods);
+    return found;
+}
+
+/// Swaps in a "cannot become key" implementation for the selectors ShellX
+/// overrides, returning the originals so the swap can be undone. Selectors the
+/// class does not declare are skipped silently: `-_canBecomeKeyWindow` is private
+/// and may be missing on some firmware.
++ (NSDictionary<NSString *, NSValue *> *)suppressKeyEligibilityForClass:(Class)classObject {
+    NSMutableDictionary<NSString *, NSValue *> *saved = [NSMutableDictionary dictionary];
+    if (!classObject) {
+        return saved;
+    }
+
+    for (NSString *name in @[ @"canBecomeKeyWindow", @"_canBecomeKeyWindow" ]) {
+        SEL selector = NSSelectorFromString(name);
+        if (![self class:classObject declaresSelector:selector]) {
+            continue;
+        }
+
+        Method method = class_getInstanceMethod(classObject, selector);
+        if (!method) {
+            continue;
+        }
+
+        IMP original = method_setImplementation(method, (IMP)KayokoFloatKeySuppressor);
+        if (original) {
+            saved[name] = [NSValue valueWithPointer:(const void *)original];
+        }
+    }
+
+    return saved;
+}
+
++ (void)restoreKeyEligibilityForClass:(Class)classObject saved:(NSDictionary<NSString *, NSValue *> *)saved {
+    if (!classObject || [saved count] == 0) {
+        return;
+    }
+
+    for (NSString *name in saved) {
+        SEL selector = NSSelectorFromString(name);
+        Method method = class_getInstanceMethod(classObject, selector);
+        if (method) {
+            method_setImplementation(method, (IMP)[saved[name] pointerValue]);
+        }
+    }
 }
 
 /// The window that routes touches. Deliberately skips ShellX's own floats,
