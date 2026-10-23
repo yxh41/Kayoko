@@ -17,26 +17,33 @@
 /// ShellX's own integration notes name this class as the way to detect it.
 static NSString *const kKayokoShellXPluginManagerClassName = @"SHELLXPluginManager";
 
-/// ShellX's floating-image manager, read out of ScreenshotShell.dylib. It
-/// declares exactly two entry points with the same `v56@0:8@16{CGRect}24`
-/// signature; `-showFloatingImage:frame:` puts the picture at a known spot,
-/// which is what "float this one" needs.
+/// ShellX's floating-image manager, read out of ScreenshotShell.dylib. It is a
+/// singleton behind the *class* method `+shared`, and it declares
+/// `-showFloatingImage:frame:` with a `v56@0:8@16{CGRect}24` signature.
 static NSString *const kKayokoShellXFloatingManagerClassName = @"SSFloatingManager";
+
+/// The window that manager builds, used only to observe whether one is visible.
+static NSString *const kKayokoShellXFloatingWindowClassName = @"SSFloatingWindow";
 
 /// Snapper 3's plugin manager, from its published extension API.
 static NSString *const kKayokoSnapper3PluginManagerClassName = @"Snapper3PluginManager";
 
-/// Snapper 3's floating window. Its `SnapMaker` holds a `SnapMakerDelegate`,
-/// and that delegate callback is `-didMakeImage:fromRect:center:` — an
-/// in-memory UIImage plus where it came from and where it should sit. Handing
-/// it an image is the only way to float the tapped item instead of "newest".
+/// Snapper 3's floating window. It has no singleton, but it is a UIWindow, so it
+/// can be found by walking the application's window list.
 static NSString *const kKayokoSnapper3WindowClassName = @"SnapperWindow";
+
+/// The selector CopyVault probes for to recognise Snapper's window, and calls to
+/// float a picture. Taking a rect in the image's own coordinates is what makes
+/// this exact instead of "whatever happened to be newest".
+static NSString *const kKayokoSnapper3SnapRectSelectorName = @"wantsToSnapRect:inImage:";
 
 /// ShellX floats the newest entry of its own history when this is posted.
 static NSString *const kKayokoShellXOpenLastNotification = @"com.iosdump.screenshotshell.openlast";
 
 /// Snapper 3's equivalent.
 static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.snapper3.openlast";
+
+static NSString *const kKayokoFloatLogPath = @"/var/mobile/Library/com.82flex.kayoko/float.log";
 
 @interface KayokoFloatActionHandler ()
 
@@ -47,22 +54,69 @@ static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.sna
 + (BOOL)writeImage:(UIImage *)image toDirectory:(NSString *)directory;
 + (void)postDarwinNotification:(NSString *)notificationName;
 + (CGRect)floatingFrameForImage:(UIImage *)image;
+
 + (BOOL)floatWithShellXInMemory:(UIImage *)image;
 + (BOOL)floatWithSnapper3InMemory:(UIImage *)image;
-+ (nullable id)snapper3WindowForClass:(Class)windowClass;
-+ (NSUInteger)snapper3SnapCountForWindow:(id)window;
-+ (BOOL)invokeSelector:(SEL)selector onTarget:(id)target image:(UIImage *)image rect:(CGRect)rect;
-+ (BOOL)invokeSelector:(SEL)selector
-              onTarget:(id)target
-                 image:(UIImage *)image
-                  rect:(CGRect)rect
-                center:(CGPoint)center;
+
++ (NSArray<UIWindow *> *)applicationWindows;
++ (nullable UIWindowScene *)activeWindowScene;
++ (nullable id)sharedInstanceOfClass:(Class)classObject selectorName:(NSString *)selectorName;
++ (nullable id)snapper3WindowInWindows:(NSArray<UIWindow *> *)windows windowClass:(Class)windowClass;
++ (NSUInteger)visibleFloatingWindowCount;
+
++ (nullable id)valueForKey:(NSString *)key onTarget:(id)target;
++ (NSUInteger)countForKey:(NSString *)key onTarget:(id)target;
++ (BOOL)boolForKey:(NSString *)key onTarget:(id)target;
+
++ (BOOL)invokeRectSelector:(SEL)selector onTarget:(id)target image:(UIImage *)image rect:(CGRect)rect;
++ (BOOL)invokeRectCenterSelector:(SEL)selector
+                        onTarget:(id)target
+                           image:(UIImage *)image
+                            rect:(CGRect)rect
+                          center:(CGPoint)center;
 + (BOOL)isCGRectArgumentType:(const char *)argumentType;
 + (BOOL)isCGPointArgumentType:(const char *)argumentType;
-+ (BOOL)boolForSelector:(SEL)selector onTarget:(id)target;
+
 + (nullable UIImage *)imageFromText:(NSString *)text;
 
 @end
+
+/// One line per attempt, appended to a file. Counting properties only tell us
+/// that a call was accepted, not that anything appeared; when neither is
+/// conclusive this log is the difference between guessing and knowing.
+static void KayokoFloatLog(NSString *step, NSString *detail) {
+    NSString *path = jbroot(kKayokoFloatLogPath);
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSString *directory = [path stringByDeletingLastPathComponent];
+    if (![fileManager fileExistsAtPath:directory]) {
+        [fileManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+    }
+
+    NSDictionary *attributes = [fileManager attributesOfItemAtPath:path error:nil];
+    if ([attributes fileSize] > 24 * 1024) {
+        [fileManager removeItemAtPath:path error:nil];
+    }
+
+    static NSDateFormatter *formatter = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        formatter = [[NSDateFormatter alloc] init];
+        formatter.dateFormat = @"MM-dd HH:mm:ss.SSS";
+    });
+
+    NSString *line = [NSString stringWithFormat:@"%@ %@ | %@\n",
+                                                [formatter stringFromDate:[NSDate date]], step, detail ?: @""];
+    NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
+    if (![fileManager fileExistsAtPath:path]) {
+        [data writeToFile:path atomically:YES];
+        return;
+    }
+
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    [handle seekToEndOfFile];
+    [handle writeData:data];
+    [handle closeFile];
+}
 
 @implementation KayokoFloatActionHandler
 
@@ -205,6 +259,7 @@ static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.sna
 + (void)floatItem:(KayokoPasteboardItem *)item {
     UIImage *image = [self imageForItem:item];
     if (!image) {
+        KayokoFloatLog(@"float", @"no image for item");
         return;
     }
 
@@ -224,6 +279,7 @@ static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.sna
     // hand-off, so it is only reached when the in-memory call was unavailable.
     NSString *directory = [self historyDirectoryForTarget:target];
     if ([directory length] == 0) {
+        KayokoFloatLog(@"fallback", @"no history directory");
         return;
     }
 
@@ -231,19 +287,22 @@ static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.sna
     // itself by already holding pictures; otherwise a name collision could drop
     // a PNG into an unrelated Library directory.
     if (target == KayokoFloatTargetShellX && ![self directoryLooksLikeImageStore:directory]) {
+        KayokoFloatLog(@"fallback", [NSString stringWithFormat:@"%@ holds no images", directory]);
         return;
     }
 
     if (![self writeImage:image toDirectory:directory]) {
+        KayokoFloatLog(@"fallback", @"write failed");
         return;
     }
 
     NSString *notificationName = target == KayokoFloatTargetShellX ? kKayokoShellXOpenLastNotification
                                                                   : kKayokoSnapper3OpenLastNotification;
     [self postDarwinNotification:notificationName];
+    KayokoFloatLog(@"fallback", [NSString stringWithFormat:@"posted %@", notificationName]);
 }
 
-/// Shared sizing: a third to two thirds of the screen, centred, never upscaled.
+/// Shared sizing: about two thirds of the screen, centred, never upscaled.
 + (CGRect)floatingFrameForImage:(UIImage *)image {
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
     if (image.size.width < 1.0 || image.size.height < 1.0) {
@@ -368,150 +427,282 @@ static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.sna
 
 #pragma mark - ShellX in-memory hand-off
 
-/// `SSFloatingManager` holds nothing but an array of windows, so a fresh
-/// instance is a complete manager: `-showFloatingImage:frame:` builds an
-/// `SSFloatingWindow` and puts it on screen by itself. The call is judged by
-/// that array growing, which is the only objective proof it landed.
+/// `SSFloatingManager` is a singleton behind the *class* method `+shared`. That
+/// detail is easy to miss: a fresh `alloc/init` leaves `_floatingWindows` empty,
+/// so `-showFloatingImage:frame:` runs against a manager that keeps no record of
+/// the window and the picture never shows up.
 + (BOOL)floatWithShellXInMemory:(UIImage *)image {
     Class managerClass = objc_getClass([kKayokoShellXFloatingManagerClassName UTF8String]);
     if (!managerClass) {
+        KayokoFloatLog(@"shellx", @"SSFloatingManager missing");
         return NO;
     }
 
-    id manager = [[managerClass alloc] init];
+    id manager = [self sharedInstanceOfClass:managerClass selectorName:@"shared"];
     if (!manager) {
+        KayokoFloatLog(@"shellx", @"+shared returned nil");
         return NO;
     }
 
-    // Counted now, not later: the ivar is a mutable array, so holding a pointer
-    // to it and counting afterwards would just read the new length back.
-    id before = [manager valueForKey:@"floatingWindows"];
-    NSUInteger beforeCount = [before isKindOfClass:[NSArray class]] ? [(NSArray *)before count] : 0;
-
+    NSUInteger beforeCount = [self countForKey:@"floatingWindows" onTarget:manager];
+    NSUInteger visibleBefore = [self visibleFloatingWindowCount];
     CGRect frame = [self floatingFrameForImage:image];
 
-    if (![self invokeSelector:NSSelectorFromString(@"showFloatingImage:frame:")
-                     onTarget:manager
-                        image:image
-                         rect:frame] &&
-        ![self invokeSelector:NSSelectorFromString(@"showFloatingImage:fromRect:")
-                     onTarget:manager
-                        image:image
-                         rect:frame]) {
-        return NO;
+    BOOL invoked = [self invokeRectSelector:NSSelectorFromString(@"showFloatingImage:frame:")
+                                   onTarget:manager
+                                      image:image
+                                       rect:frame];
+    if (!invoked) {
+        invoked = [self invokeRectSelector:NSSelectorFromString(@"showFloatingImage:fromRect:")
+                                  onTarget:manager
+                                     image:image
+                                      rect:frame];
     }
 
-    id after = [manager valueForKey:@"floatingWindows"];
-    if (![after isKindOfClass:[NSArray class]]) {
-        return NO;
-    }
+    NSUInteger afterCount = [self countForKey:@"floatingWindows" onTarget:manager];
+    NSUInteger visibleAfter = [self visibleFloatingWindowCount];
+    KayokoFloatLog(@"shellx",
+                   [NSString stringWithFormat:@"invoked=%d windows %lu->%lu visible %lu->%lu frame=%@", invoked,
+                                              (unsigned long)beforeCount, (unsigned long)afterCount,
+                                              (unsigned long)visibleBefore, (unsigned long)visibleAfter,
+                                              NSStringFromCGRect(frame)]);
 
-    return [(NSArray *)after count] > beforeCount;
+    return afterCount > beforeCount || visibleAfter > visibleBefore;
 }
 
 #pragma mark - Snapper 3 in-memory hand-off
 
-/// Snapper 3 floats through its window rather than through its history.
-/// `SnapperWindow` implements `SnapMakerDelegate`, and `-didMakeImage:fromRect:
-/// center:` is the callback Snapper itself runs once a capture exists: an
-/// in-memory UIImage, the rect it came from and where it should sit. Feeding it
-/// an image is therefore the exact equivalent of "snap this".
+/// Snapper 3 has no singleton, so its window is found by walking the
+/// application's window list and matching either the class name or - exactly
+/// what CopyVault does - the `-wantsToSnapRect:inImage:` selector.
+///
+/// That selector is then the call: "snap this rect inside this image". Passing
+/// the image's own bounds means the whole picture comes back, which is the
+/// direct hand-off the history folder can never give.
 + (BOOL)floatWithSnapper3InMemory:(UIImage *)image {
     Class windowClass = objc_getClass([kKayokoSnapper3WindowClassName UTF8String]);
-    if (!windowClass) {
-        return NO;
-    }
-
-    id window = [self snapper3WindowForClass:windowClass];
+    NSArray<UIWindow *> *windows = [self applicationWindows];
+    id window = [self snapper3WindowInWindows:windows windowClass:windowClass];
     if (!window) {
+        KayokoFloatLog(@"snapper", [NSString stringWithFormat:@"no window among %lu", (unsigned long)[windows count]]);
         return NO;
     }
 
-    NSUInteger snapCountBefore = [self snapper3SnapCountForWindow:window];
-    CGRect frame = [self floatingFrameForImage:image];
-    CGPoint center = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
+    NSUInteger snapsBefore = [self countForKey:@"snapsOverlay.numberOfSnaps" onTarget:window];
+    BOOL showingBefore = [self boolForKey:@"hasSnapsShowing" onTarget:window];
+    BOOL croppingBefore = [self boolForKey:@"isCropping" onTarget:window];
 
-    BOOL invoked = [self invokeSelector:NSSelectorFromString(@"didMakeImage:fromRect:center:")
-                               onTarget:window
-                                  image:image
-                                   rect:frame
-                                 center:center];
-    if (!invoked) {
-        return NO;
-    }
+    CGRect imageBounds = CGRectMake(0, 0, image.size.width, image.size.height);
+    BOOL invoked = [self invokeRectSelector:NSSelectorFromString(kKayokoSnapper3SnapRectSelectorName)
+                                   onTarget:window
+                                      image:image
+                                       rect:imageBounds];
 
-    if ([self snapper3SnapCountForWindow:window] > snapCountBefore) {
+    NSUInteger snapsAfter = [self countForKey:@"snapsOverlay.numberOfSnaps" onTarget:window];
+    BOOL showingAfter = [self boolForKey:@"hasSnapsShowing" onTarget:window];
+    BOOL croppingAfter = [self boolForKey:@"isCropping" onTarget:window];
+    KayokoFloatLog(@"snapper",
+                   [NSString stringWithFormat:@"%@ invoked=%d snaps %lu->%lu showing %d->%d cropping %d->%d",
+                                              NSStringFromClass([window class]), invoked,
+                                              (unsigned long)snapsBefore, (unsigned long)snapsAfter, showingBefore,
+                                              showingAfter, croppingBefore, croppingAfter]);
+
+    if (invoked && (snapsAfter > snapsBefore || (!showingBefore && showingAfter) || (!croppingBefore && croppingAfter))) {
         return YES;
     }
 
-    // A second signal, for builds whose overlay count is only refreshed lazily.
-    return [self boolForSelector:NSSelectorFromString(@"hasSnapsShowing") onTarget:window];
-}
+    // Second choice: the SnapMakerDelegate callback, which takes a finished
+    // image plus where it came from and where it should sit.
+    CGRect frame = [self floatingFrameForImage:image];
+    CGPoint center = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
+    BOOL madeImage = [self invokeRectCenterSelector:NSSelectorFromString(@"didMakeImage:fromRect:center:")
+                                           onTarget:window
+                                              image:image
+                                               rect:frame
+                                             center:center];
+    NSUInteger snapsFinal = [self countForKey:@"snapsOverlay.numberOfSnaps" onTarget:window];
+    KayokoFloatLog(@"snapper", [NSString stringWithFormat:@"didMakeImage invoked=%d snaps %lu->%lu", madeImage,
+                                                           (unsigned long)snapsAfter, (unsigned long)snapsFinal]);
 
-/// Finds the window Snapper already lives in. Enumerating the windows of the
-/// connected window scenes is the reliable half: every UIWindow of SpringBoard
-/// is listed there, including hidden ones, so no private singleton is needed.
-+ (nullable id)snapper3WindowForClass:(Class)windowClass {
-    if (!windowClass) {
-        return nil;
+    if (madeImage && (snapsFinal > snapsAfter || [self boolForKey:@"hasSnapsShowing" onTarget:window])) {
+        return YES;
     }
 
-    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+    return NO;
+}
+
+#pragma mark - Window and singleton discovery
+
+/// The window list matters more than it looks: Snapper's window is not
+/// necessarily attached to a `UIWindowScene`, so `connectedScenes` alone can come
+/// back empty even though the window is alive. The private
+/// `-allWindowsIncludingInternalWindows:onlyVisibleWindows:` call has no such
+/// blind spot and is what CopyVault relies on; both lists are unioned so either
+/// one being unavailable is harmless.
++ (NSArray<UIWindow *> *)applicationWindows {
+    NSMutableArray<UIWindow *> *windows = [NSMutableArray array];
+    UIApplication *application = [UIApplication sharedApplication];
+
+    SEL allWindowsSelector = NSSelectorFromString(@"allWindowsIncludingInternalWindows:onlyVisibleWindows:");
+    if ([application respondsToSelector:allWindowsSelector]) {
+        NSMethodSignature *signature = [application methodSignatureForSelector:allWindowsSelector];
+        if (signature && [signature numberOfArguments] == 4 && strcmp([signature methodReturnType], "@") == 0) {
+            BOOL internal = YES;
+            BOOL visibleOnly = NO;
+            NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+            [invocation setTarget:application];
+            [invocation setSelector:allWindowsSelector];
+            [invocation setArgument:&internal atIndex:2];
+            [invocation setArgument:&visibleOnly atIndex:3];
+            [invocation invoke];
+
+            id result = nil;
+            [invocation getReturnValue:&result];
+            if ([result isKindOfClass:[NSArray class]]) {
+                for (id candidate in (NSArray *)result) {
+                    if ([candidate isKindOfClass:[UIWindow class]] && ![windows containsObject:candidate]) {
+                        [windows addObject:candidate];
+                    }
+                }
+            }
+        }
+    }
+
+    for (UIScene *scene in [application connectedScenes]) {
         if (![scene isKindOfClass:[UIWindowScene class]]) {
             continue;
         }
 
         for (UIWindow *window in [(UIWindowScene *)scene windows]) {
-            if ([window isKindOfClass:windowClass]) {
-                return window;
+            if (![windows containsObject:window]) {
+                [windows addObject:window];
             }
         }
     }
 
-    // Older builds may keep it as a class-level accessor instead.
-    NSArray<NSString *> *accessorNames = @[ @"sharedInstance", @"shared", @"sharedWindow", @"defaultWindow" ];
-    for (NSString *accessorName in accessorNames) {
-        SEL accessor = NSSelectorFromString(accessorName);
-        if (![windowClass respondsToSelector:accessor]) {
+    return windows;
+}
+
++ (nullable UIWindowScene *)activeWindowScene {
+    UIApplication *application = [UIApplication sharedApplication];
+    for (UIScene *scene in [application connectedScenes]) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) {
             continue;
         }
 
-        NSMethodSignature *signature = [windowClass methodSignatureForSelector:accessor];
-        if (!signature || strcmp([signature methodReturnType], "@") != 0) {
-            continue;
+        if (scene.activationState == UISceneActivationStateForegroundActive) {
+            return (UIWindowScene *)scene;
         }
+    }
 
-        NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-        [invocation setTarget:windowClass];
-        [invocation setSelector:accessor];
-        [invocation invoke];
-
-        id result = nil;
-        [invocation getReturnValue:&result];
-        if ([result isKindOfClass:windowClass]) {
-            return result;
+    for (UIScene *scene in [application connectedScenes]) {
+        if ([scene isKindOfClass:[UIWindowScene class]]) {
+            return (UIWindowScene *)scene;
         }
     }
 
     return nil;
 }
 
-/// How many snaps are floating right now, read off the overlay the window owns.
-+ (NSUInteger)snapper3SnapCountForWindow:(id)window {
-    @try {
-        id overlay = [window valueForKey:@"snapsOverlay"];
-        if (!overlay || ![overlay respondsToSelector:NSSelectorFromString(@"numberOfSnaps")]) {
-            return 0;
-        }
-
-        id value = [overlay valueForKey:@"numberOfSnaps"];
-        return [value respondsToSelector:@selector(unsignedIntegerValue)] ? [value unsignedIntegerValue] : 0;
-    } @catch (NSException *exception) {
-        (void)exception;
+/// How many ShellX floating windows are actually on screen, which is the only
+/// end-to-end signal available: the manager's array can grow while the window
+/// stays hidden.
++ (NSUInteger)visibleFloatingWindowCount {
+    Class windowClass = objc_getClass([kKayokoShellXFloatingWindowClassName UTF8String]);
+    if (!windowClass) {
         return 0;
     }
 
+    NSUInteger count = 0;
+    for (UIWindow *window in [self applicationWindows]) {
+        if ([window isKindOfClass:windowClass] && !window.isHidden) {
+            count += 1;
+        }
+    }
+
+    return count;
+}
+
++ (nullable id)sharedInstanceOfClass:(Class)classObject selectorName:(NSString *)selectorName {
+    if (!classObject || [selectorName length] == 0) {
+        return nil;
+    }
+
+    SEL selector = NSSelectorFromString(selectorName);
+    if (![classObject respondsToSelector:selector]) {
+        return nil;
+    }
+
+    NSMethodSignature *signature = [classObject methodSignatureForSelector:selector];
+    if (!signature || [signature numberOfArguments] != 2 || strcmp([signature methodReturnType], "@") != 0) {
+        return nil;
+    }
+
+    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+    [invocation setTarget:classObject];
+    [invocation setSelector:selector];
+    [invocation invoke];
+
+    id result = nil;
+    [invocation getReturnValue:&result];
+    return result;
+}
+
+/// Selector first, class second: the selector survives a renamed class, and it
+/// is exactly how CopyVault recognises the window.
++ (nullable id)snapper3WindowInWindows:(NSArray<UIWindow *> *)windows windowClass:(Class)windowClass {
+    SEL probe = NSSelectorFromString(kKayokoSnapper3SnapRectSelectorName);
+    for (id window in windows) {
+        if ([window respondsToSelector:probe]) {
+            return window;
+        }
+    }
+
+    if (!windowClass) {
+        return nil;
+    }
+
+    for (id window in windows) {
+        if ([window isKindOfClass:windowClass]) {
+            return window;
+        }
+    }
+
+    return nil;
+}
+
++ (nullable id)valueForKey:(NSString *)key onTarget:(id)target {
+    if (!target || [key length] == 0) {
+        return nil;
+    }
+
+    @try {
+        if ([key containsString:@"."]) {
+            return [target valueForKeyPath:key];
+        }
+        return [target valueForKey:key];
+    } @catch (NSException *exception) {
+        (void)exception;
+        return nil;
+    }
+}
+
++ (NSUInteger)countForKey:(NSString *)key onTarget:(id)target {
+    id value = [self valueForKey:key onTarget:target];
+    if ([value isKindOfClass:[NSArray class]] || [value isKindOfClass:[NSSet class]]) {
+        return [value count];
+    }
+
+    if ([value respondsToSelector:@selector(unsignedIntegerValue)]) {
+        return [value unsignedIntegerValue];
+    }
+
     return 0;
+}
+
++ (BOOL)boolForKey:(NSString *)key onTarget:(id)target {
+    id value = [self valueForKey:key onTarget:target];
+    return [value respondsToSelector:@selector(boolValue)] ? [value boolValue] : NO;
 }
 
 #pragma mark - Reflection helpers
@@ -534,10 +725,11 @@ static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.sna
     return strncmp(argumentType, "{CGPoint=", 9) == 0;
 }
 
-/// Invokes `-(void)foo:(UIImage *)image bar:(CGRect)rect` on an object we know
-/// nothing about, refusing to call if the argument types do not line up. That
-/// refusal is what keeps a signature mismatch from turning into a crash.
-+ (BOOL)invokeSelector:(SEL)selector onTarget:(id)target image:(UIImage *)image rect:(CGRect)rect {
+/// Invokes `foo:(UIImage *) bar:(CGRect)` or `foo:(CGRect) bar:(UIImage *)`,
+/// whichever the target actually declares. The order genuinely differs between
+/// the two hosts - ShellX takes the image first, Snapper takes the rect first -
+/// and getting it backwards would hand a struct where a pointer is expected.
++ (BOOL)invokeRectSelector:(SEL)selector onTarget:(id)target image:(UIImage *)image rect:(CGRect)rect {
     if (!target || !selector || ![target respondsToSelector:selector]) {
         return NO;
     }
@@ -547,9 +739,15 @@ static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.sna
         return NO;
     }
 
-    const char *imageType = [signature getArgumentTypeAtIndex:2];
-    const char *rectType = [signature getArgumentTypeAtIndex:3];
-    if (!imageType || imageType[0] != '@' || ![self isCGRectArgumentType:rectType]) {
+    const char *secondType = [signature getArgumentTypeAtIndex:2];
+    const char *thirdType = [signature getArgumentTypeAtIndex:3];
+    if (!secondType || !thirdType) {
+        return NO;
+    }
+
+    BOOL imageFirst = secondType[0] == '@' && [self isCGRectArgumentType:thirdType];
+    BOOL rectFirst = [self isCGRectArgumentType:secondType] && thirdType[0] == '@';
+    if (!imageFirst && !rectFirst) {
         return NO;
     }
 
@@ -558,19 +756,24 @@ static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.sna
     [invocation setSelector:selector];
 
     UIImage *imageArgument = image;
-    [invocation setArgument:&imageArgument atIndex:2];
     CGRect rectArgument = rect;
-    [invocation setArgument:&rectArgument atIndex:3];
+    if (imageFirst) {
+        [invocation setArgument:&imageArgument atIndex:2];
+        [invocation setArgument:&rectArgument atIndex:3];
+    } else {
+        [invocation setArgument:&rectArgument atIndex:2];
+        [invocation setArgument:&imageArgument atIndex:3];
+    }
     [invocation invoke];
     return YES;
 }
 
-/// Same idea for `-(void)foo:(UIImage *)image bar:(CGRect)rect baz:(CGPoint)point`.
-+ (BOOL)invokeSelector:(SEL)selector
-              onTarget:(id)target
-                 image:(UIImage *)image
-                  rect:(CGRect)rect
-                center:(CGPoint)center {
+/// Same idea for `foo:(UIImage *) bar:(CGRect) baz:(CGPoint)`.
++ (BOOL)invokeRectCenterSelector:(SEL)selector
+                        onTarget:(id)target
+                           image:(UIImage *)image
+                            rect:(CGRect)rect
+                          center:(CGPoint)center {
     if (!target || !selector || ![target respondsToSelector:selector]) {
         return NO;
     }
@@ -600,50 +803,6 @@ static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.sna
     [invocation setArgument:&centerArgument atIndex:4];
     [invocation invoke];
     return YES;
-}
-
-/// Reads a BOOL-returning method without trusting its return type blindly.
-+ (BOOL)boolForSelector:(SEL)selector onTarget:(id)target {
-    if (!target || !selector || ![target respondsToSelector:selector]) {
-        return NO;
-    }
-
-    NSMethodSignature *signature = [target methodSignatureForSelector:selector];
-    if (!signature || [signature numberOfArguments] != 2) {
-        return NO;
-    }
-
-    const char *returnType = [signature methodReturnType];
-    if (!returnType) {
-        return NO;
-    }
-
-    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
-    [invocation setTarget:target];
-    [invocation setSelector:selector];
-    [invocation invoke];
-
-    switch (returnType[0]) {
-        case 'B':
-        case 'c': {
-            BOOL value = NO;
-            [invocation getReturnValue:&value];
-            return value;
-        }
-        case 'i': {
-            int value = 0;
-            [invocation getReturnValue:&value];
-            return value != 0;
-        }
-        case 'q':
-        case 'Q': {
-            long long value = 0;
-            [invocation getReturnValue:&value];
-            return value != 0;
-        }
-        default:
-            return NO;
-    }
 }
 
 @end
