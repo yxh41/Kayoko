@@ -5,6 +5,7 @@
 
 #import "KayokoHistoryListViewController.h"
 #import "KayokoFavoritesTableView.h"
+#import "KayokoFloatActionHandler.h"
 #import "KayokoHistoryItemActionHandler.h"
 #import "KayokoHistoryListView.h"
 #import "KayokoHistoryTableView.h"
@@ -821,8 +822,14 @@ NS_ASSUME_NONNULL_END
 
 - (UISwipeActionsConfiguration *)tableView:(UITableView *)tableView
     trailingSwipeActionsConfigurationForRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSMutableArray<UIContextualAction *> *actions = [[NSMutableArray alloc] init];
     NSDictionary<NSString *, id> *dictionary = [self itemDictionaryAtIndexPath:indexPath];
     KayokoPasteboardItem *item = [KayokoPasteboardItem itemFromDictionary:dictionary];
+
+    UIContextualAction *floatAction = [self floatActionForItem:item];
+    if (floatAction) {
+        [actions addObject:floatAction];
+    }
 
     UIContextualAction *deleteAction = [UIContextualAction
         contextualActionWithStyle:UIContextualActionStyleDestructive
@@ -849,7 +856,8 @@ NS_ASSUME_NONNULL_END
                           }];
     [deleteAction setImage:[UIImage systemImageNamed:@"trash.fill"]];
     [deleteAction setBackgroundColor:[UIColor systemRedColor]];
-    return [UISwipeActionsConfiguration configurationWithActions:@[ deleteAction ]];
+    [actions addObject:deleteAction];
+    return [UISwipeActionsConfiguration configurationWithActions:actions];
 }
 
 #pragma mark - Swipe Actions
@@ -999,6 +1007,39 @@ NS_ASSUME_NONNULL_END
     [faircopyAction setImage:[UIImage systemImageNamed:@"wand.and.stars"]];
     [faircopyAction setBackgroundColor:[UIColor colorWithRed:0.498 green:0.467 blue:0.867 alpha:1.0]];
     return faircopyAction;
+}
+
+/// The floating-image action, on the left swipe next to delete.
+///
+/// Unlike the other actions this one hides itself when no floating host is
+/// installed, so the row never grows a dead button. Both images and text work:
+/// text clips are rendered into a picture first (see KayokoFloatActionHandler).
+- (nullable UIContextualAction *)floatActionForItem:(KayokoPasteboardItem *)item {
+    if (![KayokoFloatActionHandler isAvailable]) {
+        return nil;
+    }
+
+    if (![KayokoFloatActionHandler imageForItem:item]) {
+        return nil;
+    }
+
+    UIContextualAction *floatAction = [UIContextualAction
+        contextualActionWithStyle:UIContextualActionStyleNormal
+                            title:@""
+                          handler:^(__unused UIContextualAction *action, __unused __kindof UIView *sourceView,
+                                    void (^completionHandler)(BOOL)) {
+                            [KayokoFloatActionHandler floatItem:item];
+                            // The floating image is meant to stay while other
+                            // apps are used, so Kayoko closes like the other
+                            // hand-off actions do.
+                            [[self delegate] historyListViewControllerDidRequestHide:self];
+                            if (completionHandler) {
+                                completionHandler(YES);
+                            }
+                          }];
+    [floatAction setImage:[UIImage systemImageNamed:@"rectangle.on.rectangle"]];
+    [floatAction setBackgroundColor:[UIColor systemTealColor]];
+    return floatAction;
 }
 
 /// Hands one clipboard item to Faircopy.

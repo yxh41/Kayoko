@@ -19,7 +19,7 @@
 			<key>headerSubtitle</key>
 			<string>Feature-rich clipboard manager for iOS.</string>
 			<key>detail</key>
-			<string>v4.3.5</string>
+			<string>v4.3.6</string>
 			<key>height</key>
 			<integer>92</integer>
 		</dict>
@@ -454,6 +454,55 @@
 			<string>FaircopyAction</string>
 			<key>label</key>
 			<string>FAIRCOPY_SWIPE_ACTION</string>
+			<key>PostNotification</key>
+			<string>com.82flex.kayoko.preferences.reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Floating Image</string>
+			<key>footerText</key>
+			<string>Adds a “Float” action to the left swipe of an item. Images float as they are; text clips are rendered into a picture first. The action only appears when the host you pick is installed.</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>default</key>
+			<true/>
+			<key>defaults</key>
+			<string>com.82flex.kayoko.preferences</string>
+			<key>key</key>
+			<string>FloatAction</string>
+			<key>label</key>
+			<string>FLOAT_SWIPE_ACTION</string>
+			<key>PostNotification</key>
+			<string>com.82flex.kayoko.preferences.reload</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSSegmentCell</string>
+			<key>default</key>
+			<integer>0</integer>
+			<key>defaults</key>
+			<string>com.82flex.kayoko.preferences</string>
+			<key>key</key>
+			<string>FloatTarget</string>
+			<key>label</key>
+			<string>FLOAT_HOST</string>
+			<key>validTitles</key>
+			<array>
+				<string>Automatic</string>
+				<string>ShellX</string>
+				<string>Snapper 3</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<integer>0</integer>
+				<integer>1</integer>
+				<integer>2</integer>
+			</array>
 			<key>PostNotification</key>
 			<string>com.82flex.kayoko.preferences.reload</string>
 		</dict>

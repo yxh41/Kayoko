@@ -4,6 +4,7 @@
 "ACTIVATION_METHODS" = "Activation";
 "Acknowledgments & Licenses" = "Acknowledgments & Licenses";
 "Adds a “Faircopy” action to the right swipe of a text item. It hands the clip to the Faircopy writing panel." = "Adds a “Faircopy” action to the right swipe of a text item. It hands the clip to the Faircopy writing panel.";
+"Adds a “Float” action to the left swipe of an item. Images float as they are; text clips are rendered into a picture first. The action only appears when the host you pick is installed." = "Adds a “Float” action to the left swipe of an item. Images float as they are; text clips are rendered into a picture first. The action only appears when the host you pick is installed.";
 "Activation Method" = "Activation Method";
 "Activation Methods" = "Activation Methods";
 "Advanced Options" = "Advanced Options";
@@ -29,6 +30,8 @@
 "Edit Menu" = "Edit Menu";
 "Enable Kayoko" = "Enable Kayoko";
 "FAIRCOPY_SWIPE_ACTION" = "Faircopy Swipe Action";
+"FLOAT_HOST" = "Floating Host";
+"FLOAT_SWIPE_ACTION" = "Float as Image";
 "Favorites" = "Favorites";
 "Feature-rich clipboard manager for iOS." = "Feature-rich clipboard manager for iOS.";
 "Feedbacks" = "Feedbacks";

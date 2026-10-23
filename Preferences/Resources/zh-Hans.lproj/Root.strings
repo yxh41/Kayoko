@@ -4,6 +4,7 @@
 "ACTIVATION_METHODS" = "激活方法";
 "Acknowledgments & Licenses" = "致谢与许可";
 "Adds a “Faircopy” action to the right swipe of a text item. It hands the clip to the Faircopy writing panel." = "在文本条目右滑时加入「Faircopy」动作，把这条剪贴内容交给 Faircopy 写作面板。";
+"Adds a “Float” action to the left swipe of an item. Images float as they are; text clips are rendered into a picture first. The action only appears when the host you pick is installed." = "在条目左滑时加入「悬浮」动作。图片原样悬浮；文字会先被渲染成一张图。只有选中的悬浮宿主已安装时，这个动作才会出现。";
 "Activation Method" = "激活方法";
 "Activation Methods" = "激活方法";
 "Advanced Options" = "高级选项";
@@ -29,6 +30,8 @@
 "Edit Menu" = "编辑菜单";
 "Enable Kayoko" = "启用 Kayoko";
 "FAIRCOPY_SWIPE_ACTION" = "Faircopy 右滑动作";
+"FLOAT_HOST" = "悬浮宿主";
+"FLOAT_SWIPE_ACTION" = "悬浮为图片";
 "Favorites" = "收藏夹";
 "Feature-rich clipboard manager for iOS." = "功能丰富的 iOS 剪贴板管理器。";
 "Feedbacks" = "反馈";

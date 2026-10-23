@@ -76,6 +76,8 @@ static NSString *const kKayokoPreferenceKeyPreviewLineCount = @"PreviewLineCount
 static NSString *const kKayokoPreferenceKeyItemDetailsMode = @"ItemDetailsMode";
 static NSString *const kKayokoPreferenceKeyHeightInPoints = @"HeightInPoints";
 static NSString *const kKayokoPreferenceKeyFaircopyAction = @"FaircopyAction";
+static NSString *const kKayokoPreferenceKeyFloatAction = @"FloatAction";
+static NSString *const kKayokoPreferenceKeyFloatTarget = @"FloatTarget";
 
 static BOOL const kKayokoPreferenceKeyEnabledDefaultValue = YES;
 static NSUInteger const kKayokoPreferenceKeyMaximumHistoryAmountDefaultValue = 200;
@@ -104,3 +106,5 @@ static NSUInteger const kKayokoPreferenceKeyPreviewLineCountDefaultValue = 1;
 static KayokoItemDetailsMode const kKayokoPreferenceKeyItemDetailsModeDefaultValue = kKayokoItemDetailsModeImagesOnly;
 static CGFloat const kKayokoPreferenceKeyHeightInPointsDefaultValue = 420;
 static BOOL const kKayokoPreferenceKeyFaircopyActionDefaultValue = YES;
+static BOOL const kKayokoPreferenceKeyFloatActionDefaultValue = YES;
+static NSUInteger const kKayokoPreferenceKeyFloatTargetDefaultValue = 0;
