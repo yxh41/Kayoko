@@ -7,6 +7,8 @@
 
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import <roothide.h>
+#import <string.h>
 
 #import "KayokoPasteboardItem.h"
 #import "KayokoPasteboardManager.h"
@@ -352,7 +354,7 @@
 
     // `openLastSnap` picks the newest history entry up from preferences, so the
     // file we just wrote has to be named there too.
-    CFPreferencesSetValue(CFSTR("lastSnapFileName"), (__bridge CFPropertyListRef)fileName,
+    CFPreferencesSetValue(CFSTR("lastSnapFileName"), (__bridge CFTypeRef)fileName,
                           CFSTR("com.jontelang.snapper3preferences"), kCFPreferencesCurrentUser,
                           kCFPreferencesAnyHost);
     CFPreferencesSynchronize(CFSTR("com.jontelang.snapper3preferences"), kCFPreferencesCurrentUser,
