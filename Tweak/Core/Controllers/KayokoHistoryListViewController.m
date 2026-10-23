@@ -826,11 +826,6 @@ NS_ASSUME_NONNULL_END
     NSDictionary<NSString *, id> *dictionary = [self itemDictionaryAtIndexPath:indexPath];
     KayokoPasteboardItem *item = [KayokoPasteboardItem itemFromDictionary:dictionary];
 
-    UIContextualAction *floatAction = [self floatActionForItem:item];
-    if (floatAction) {
-        [actions addObject:floatAction];
-    }
-
     UIContextualAction *deleteAction = [UIContextualAction
         contextualActionWithStyle:UIContextualActionStyleDestructive
                             title:@""
@@ -856,7 +851,15 @@ NS_ASSUME_NONNULL_END
                           }];
     [deleteAction setImage:[UIImage systemImageNamed:@"trash.fill"]];
     [deleteAction setBackgroundColor:[UIColor systemRedColor]];
+    // Delete goes first on purpose: on a trailing swipe the first action is the
+    // one a full swipe lands on, and that has to stay delete.
     [actions addObject:deleteAction];
+
+    UIContextualAction *floatAction = [self floatActionForItem:item];
+    if (floatAction) {
+        [actions addObject:floatAction];
+    }
+
     return [UISwipeActionsConfiguration configurationWithActions:actions];
 }
 

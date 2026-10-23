@@ -107,4 +107,4 @@ static KayokoItemDetailsMode const kKayokoPreferenceKeyItemDetailsModeDefaultVal
 static CGFloat const kKayokoPreferenceKeyHeightInPointsDefaultValue = 420;
 static BOOL const kKayokoPreferenceKeyFaircopyActionDefaultValue = YES;
 static BOOL const kKayokoPreferenceKeyFloatActionDefaultValue = YES;
-static NSUInteger const kKayokoPreferenceKeyFloatTargetDefaultValue = 0;
+static NSUInteger const kKayokoPreferenceKeyFloatTargetDefaultValue = 1;

@@ -5,6 +5,7 @@
 "Acknowledgments & Licenses" = "Acknowledgments & Licenses";
 "Adds a “Faircopy” action to the right swipe of a text item. It hands the clip to the Faircopy writing panel." = "Adds a “Faircopy” action to the right swipe of a text item. It hands the clip to the Faircopy writing panel.";
 "Adds a “Float” action to the left swipe of an item. Images float as they are; text clips are rendered into a picture first. The action only appears when the host you pick is installed." = "Adds a “Float” action to the left swipe of an item. Images float as they are; text clips are rendered into a picture first. The action only appears when the host you pick is installed.";
+"FLOATING_IMAGE_HOST_NOTE" = "Pick which tweak receives the picture. Both hosts float the newest entry of their own image history, so Kayoko writes the picture there first and then asks them to float it.";
 "Activation Method" = "Activation Method";
 "Activation Methods" = "Activation Methods";
 "Advanced Options" = "Advanced Options";
