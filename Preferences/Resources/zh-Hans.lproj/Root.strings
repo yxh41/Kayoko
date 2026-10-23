@@ -3,6 +3,7 @@
 "%@ data was imported successfully. Restart SpringBoard now to finish the import and continue using Kayoko." = "%@ 数据已成功导入。你需要立即重启 SpringBoard，才能完成导入并继续使用 Kayoko。";
 "ACTIVATION_METHODS" = "激活方法";
 "Acknowledgments & Licenses" = "致谢与许可";
+"Adds a “Faircopy” action to the right swipe of a text item. It hands the clip to the Faircopy writing panel." = "在文本条目右滑时加入「Faircopy」动作，把这条剪贴内容交给 Faircopy 写作面板。";
 "Activation Method" = "激活方法";
 "Activation Methods" = "激活方法";
 "Advanced Options" = "高级选项";
@@ -27,6 +28,7 @@
 "Double Line" = "双行";
 "Edit Menu" = "编辑菜单";
 "Enable Kayoko" = "启用 Kayoko";
+"FAIRCOPY_SWIPE_ACTION" = "Faircopy 右滑动作";
 "Favorites" = "收藏夹";
 "Feature-rich clipboard manager for iOS." = "功能丰富的 iOS 剪贴板管理器。";
 "Feedbacks" = "反馈";

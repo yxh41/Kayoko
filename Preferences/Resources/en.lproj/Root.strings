@@ -3,6 +3,7 @@
 "%@ data was imported successfully. Restart SpringBoard now to finish the import and continue using Kayoko." = "%@ data was imported successfully. Restart SpringBoard now to finish the import and continue using Kayoko.";
 "ACTIVATION_METHODS" = "Activation";
 "Acknowledgments & Licenses" = "Acknowledgments & Licenses";
+"Adds a “Faircopy” action to the right swipe of a text item. It hands the clip to the Faircopy writing panel." = "Adds a “Faircopy” action to the right swipe of a text item. It hands the clip to the Faircopy writing panel.";
 "Activation Method" = "Activation Method";
 "Activation Methods" = "Activation Methods";
 "Advanced Options" = "Advanced Options";
@@ -27,6 +28,7 @@
 "Double Line" = "Double Line";
 "Edit Menu" = "Edit Menu";
 "Enable Kayoko" = "Enable Kayoko";
+"FAIRCOPY_SWIPE_ACTION" = "Faircopy Swipe Action";
 "Favorites" = "Favorites";
 "Feature-rich clipboard manager for iOS." = "Feature-rich clipboard manager for iOS.";
 "Feedbacks" = "Feedbacks";

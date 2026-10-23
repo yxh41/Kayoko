@@ -956,7 +956,23 @@ NS_ASSUME_NONNULL_END
     return linkAction;
 }
 
+/// Reads the “Faircopy” swipe action preference straight from the shared
+/// defaults suite. A fresh instance is used on purpose: SpringBoard outlives the
+/// preferences pane, so anything cached at launch would go stale the moment the
+/// switch is flipped.
+- (BOOL)faircopyActionEnabled {
+    NSUserDefaults *preferences = [[NSUserDefaults alloc] initWithSuiteName:kKayokoPreferencesIdentifier];
+    [preferences registerDefaults:@{
+        kKayokoPreferenceKeyFaircopyAction : @(kKayokoPreferenceKeyFaircopyActionDefaultValue),
+    }];
+    return [preferences boolForKey:kKayokoPreferenceKeyFaircopyAction];
+}
+
 - (nullable UIContextualAction *)faircopyActionForItem:(KayokoPasteboardItem *)item {
+    if (![self faircopyActionEnabled]) {
+        return nil;
+    }
+
     NSString *content = [item content];
     // Only plain text can be handed over: Faircopy's keyword is a string and
     // an image clip has no text to send.
@@ -977,8 +993,11 @@ NS_ASSUME_NONNULL_END
                                 completionHandler(YES);
                             }
                           }];
-    [faircopyAction setImage:[UIImage systemImageNamed:@"sparkles"]];
-    [faircopyAction setBackgroundColor:[UIColor systemPurpleColor]];
+    // A wand reads as “let the model do something with this”, which the plain
+    // sparkles glyph did not; the violet is light enough to stay distinct from
+    // the pink, orange, blue and green actions sitting next to it in the row.
+    [faircopyAction setImage:[UIImage systemImageNamed:@"wand.and.stars"]];
+    [faircopyAction setBackgroundColor:[UIColor colorWithRed:0.498 green:0.467 blue:0.867 alpha:1.0]];
     return faircopyAction;
 }
 
