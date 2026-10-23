@@ -8,6 +8,7 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <roothide.h>
+#import <math.h>
 #import <string.h>
 
 #import "KayokoPasteboardItem.h"
@@ -20,7 +21,17 @@ static NSString *const kKayokoShellXPluginManagerClassName = @"SHELLXPluginManag
 /// ShellX's floating-image manager, read out of ScreenshotShell.dylib. It is a
 /// singleton behind the *class* method `+shared`, and it declares
 /// `-showFloatingImage:frame:` with a `v56@0:8@16{CGRect}24` signature.
+///
+/// Calling it works, but the window it builds has no lifecycle of its own when
+/// it is summoned from SpringBoard while a swipe action is unwinding: the float
+/// appears and then the whole UI stops taking touches. The inbox below is the
+/// channel ShellX actually provides for other processes, so that one is used
+/// instead and this class is only named for the availability check.
 static NSString *const kKayokoShellXFloatingManagerClassName = @"SSFloatingManager";
+
+/// Where another process hands ShellX an image to float. ShellX picks the file
+/// up itself, which keeps the window inside its own lifecycle.
+static NSString *const kKayokoShellXClipImageNotification = @"com.iosdump.screenshotshell.clipimg";
 
 /// The window that manager builds, used only to observe whether one is visible.
 static NSString *const kKayokoShellXFloatingWindowClassName = @"SSFloatingWindow";
@@ -64,6 +75,22 @@ static NSString *const kKayokoFloatLogPath = @"/var/mobile/Library/com.82flex.ka
 + (nullable id)snapper3WindowInWindows:(NSArray<UIWindow *> *)windows windowClass:(Class)windowClass;
 + (NSUInteger)visibleFloatingWindowCount;
 
++ (BOOL)isFloatingWindow:(UIWindow *)window;
++ (nullable UIWindow *)keyWindowInWindows:(NSArray<UIWindow *> *)windows excludingFloating:(BOOL)excludingFloating;
++ (BOOL)restoreKeyWindow:(UIWindow *)window;
++ (nullable UIWindow *)primaryWindowInWindows:(NSArray<UIWindow *> *)windows;
++ (nullable UIWindow *)ensureKeyWindow:(UIWindow *)preferred;
++ (nullable NSString *)keyWindowDescriptionInWindows:(NSArray<UIWindow *> *)windows;
++ (nullable NSString *)floatingWindowDescriptionInWindows:(NSArray<UIWindow *> *)windows;
+
++ (NSArray<UIView *> *)snapViewsInWindow:(UIWindow *)window;
++ (nullable UIView *)snapViewAddedSince:(NSArray<UIView *> *)existing inWindow:(UIWindow *)window;
++ (BOOL)centerNewestSnapInWindow:(UIWindow *)window
+                           image:(UIImage *)image
+                        existing:(NSArray<UIView *> *)existing
+                         attempt:(NSUInteger)attempt;
++ (BOOL)centerNewestSnapInWindow:(UIWindow *)window image:(UIImage *)image existing:(NSArray<UIView *> *)existing;
+
 + (nullable id)valueForKey:(NSString *)key onTarget:(id)target;
 + (NSUInteger)countForKey:(NSString *)key onTarget:(id)target;
 + (BOOL)boolForKey:(NSString *)key onTarget:(id)target;
@@ -74,6 +101,7 @@ static NSString *const kKayokoFloatLogPath = @"/var/mobile/Library/com.82flex.ka
                            image:(UIImage *)image
                             rect:(CGRect)rect
                           center:(CGPoint)center;
++ (BOOL)invokePointSelector:(SEL)selector onTarget:(id)target point:(CGPoint)point;
 + (NSUInteger)argumentCountForSelector:(SEL)selector;
 + (nullable NSString *)signatureDescriptionForSelector:(SEL)selector onTarget:(id)target;
 + (void)fallBackToHistoryWithImage:(UIImage *)image target:(KayokoFloatTarget)target;
@@ -449,6 +477,16 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
 /// detail is easy to miss: a fresh `alloc/init` leaves `_floatingWindows` empty,
 /// so `-showFloatingImage:frame:` runs against a manager that keeps no record of
 /// the window and the picture never shows up.
+///
+/// The key window is the other trap. `SSFloatingWindow` overrides both
+/// `-canBecomeKeyWindow` and `-_canBecomeKeyWindow`, and the manager raises the
+/// new window with `-makeKeyAndVisible`; ShellX gets away with it because its
+/// own flow always ends by closing the float, and closing it is what hands key
+/// back. We never close it, so key would stay with a small window that has no
+/// business routing touches, the screen would still draw but stop responding,
+/// and only a respring would clear it. Taking key back right after the call is
+/// therefore not cosmetic - it is the difference between "floats an image" and
+/// "freezes the device".
 + (BOOL)floatWithShellXInMemory:(UIImage *)image {
     Class managerClass = objc_getClass([kKayokoShellXFloatingManagerClassName UTF8String]);
     if (!managerClass) {
@@ -461,6 +499,10 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
         KayokoFloatLog(@"shellx", @"+shared returned nil");
         return NO;
     }
+
+    NSArray<UIWindow *> *windowsBefore = [self applicationWindows];
+    NSString *keyBefore = [self keyWindowDescriptionInWindows:windowsBefore];
+    UIWindow *keyWindowBefore = [self keyWindowInWindows:windowsBefore excludingFloating:YES];
 
     NSUInteger beforeCount = [self countForKey:@"floatingWindows" onTarget:manager];
     NSUInteger visibleBefore = [self visibleFloatingWindowCount];
@@ -477,14 +519,30 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
                                       rect:frame];
     }
 
+    // Read the float's state before handing key back, otherwise the interesting
+    // part - whether it took key at all - is already gone by the time we log.
+    NSString *floatDescription = [self floatingWindowDescriptionInWindows:[self applicationWindows]];
+
+    // Twice: `-makeKeyAndVisible` is synchronous inside the manager, so the
+    // first call is the one that matters, but ShellX also re-raises the window
+    // from a `dispatch_async` in some builds. The second call is a no-op once
+    // key is already back where it belongs.
+    [self ensureKeyWindow:keyWindowBefore];
+    UIWindow *keyWindowArgument = keyWindowBefore;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.12 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [self ensureKeyWindow:keyWindowArgument];
+    });
+
     NSUInteger afterCount = [self countForKey:@"floatingWindows" onTarget:manager];
     NSUInteger visibleAfter = [self visibleFloatingWindowCount];
+    NSString *keyAfter = [self keyWindowDescriptionInWindows:[self applicationWindows]];
     KayokoFloatLog(@"shellx",
-                   [NSString stringWithFormat:@"%@ invoked=%d windows %lu->%lu visible %lu->%lu frame=%@",
+                   [NSString stringWithFormat:@"%@ invoked=%d windows %lu->%lu visible %lu->%lu frame=%@ key %@->%@ "
+                                              @"float=%@",
                                               NSStringFromClass([manager class]), invoked,
                                               (unsigned long)beforeCount, (unsigned long)afterCount,
                                               (unsigned long)visibleBefore, (unsigned long)visibleAfter,
-                                              NSStringFromCGRect(frame)]);
+                                              NSStringFromCGRect(frame), keyBefore, keyAfter, floatDescription]);
 
     return afterCount > beforeCount || visibleAfter > visibleBefore;
 }
@@ -510,6 +568,7 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     NSUInteger snapsBefore = [self countForKey:@"snapsOverlay.numberOfSnaps" onTarget:window];
     BOOL showingBefore = [self boolForKey:@"hasSnapsShowing" onTarget:window];
     BOOL croppingBefore = [self boolForKey:@"isCropping" onTarget:window];
+    NSArray<UIView *> *existingSnapViews = [self snapViewsInWindow:window];
 
     CGRect imageBounds = CGRectMake(0, 0, image.size.width, image.size.height);
     BOOL invoked = [self invokeRectSelector:NSSelectorFromString(kKayokoSnapper3SnapRectSelectorName)
@@ -527,6 +586,11 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
                                               showingAfter, croppingBefore, croppingAfter]);
 
     if (invoked && (snapsAfter > snapsBefore || (!showingBefore && showingAfter) || (!croppingBefore && croppingAfter))) {
+        // Which pixels and where they land are two separate decisions in
+        // Snapper: the rect only picks the pixels, the position comes from its
+        // own cascade counter (`santaCount`), so a new snap shows up wherever
+        // the previous ones left off. Put it on the centre explicitly.
+        [self centerNewestSnapInWindow:window image:image existing:existingSnapViews];
         return YES;
     }
 
@@ -642,6 +706,132 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     return count;
 }
 
++ (BOOL)isFloatingWindow:(UIWindow *)window {
+    Class windowClass = objc_getClass([kKayokoShellXFloatingWindowClassName UTF8String]);
+    if (!windowClass || ![window isKindOfClass:[UIWindow class]]) {
+        return NO;
+    }
+
+    return [window isKindOfClass:windowClass];
+}
+
+/// The window that routes touches. Deliberately skips ShellX's own floats,
+/// because the whole point of this lookup is to find who had key *before* one of
+/// them took it.
++ (nullable UIWindow *)keyWindowInWindows:(NSArray<UIWindow *> *)windows excludingFloating:(BOOL)excludingFloating {
+    for (UIWindow *window in windows) {
+        if (!window.isKeyWindow) {
+            continue;
+        }
+
+        if (excludingFloating && [self isFloatingWindow:window]) {
+            continue;
+        }
+
+        return window;
+    }
+
+    return nil;
+}
+
++ (BOOL)restoreKeyWindow:(UIWindow *)window {
+    if (![window isKindOfClass:[UIWindow class]]) {
+        return NO;
+    }
+
+    if (window.isKeyWindow) {
+        return YES;
+    }
+
+    if (!window.canBecomeKeyWindow) {
+        return NO;
+    }
+
+    [window makeKeyWindow];
+    return window.isKeyWindow;
+}
+
+/// The window that would hold key if everything sensible were in order: the
+/// biggest normal-level, non-float window. Only used when nothing at all has
+/// key, which already means the screen is not receiving touches.
++ (nullable UIWindow *)primaryWindowInWindows:(NSArray<UIWindow *> *)windows {
+    UIWindow *best = nil;
+    CGFloat bestArea = 0;
+
+    for (UIWindow *window in windows) {
+        if (window.isHidden || [self isFloatingWindow:window] || !window.canBecomeKeyWindow) {
+            continue;
+        }
+
+        if (window.windowLevel != UIWindowLevelNormal) {
+            continue;
+        }
+
+        CGFloat area = window.frame.size.width * window.frame.size.height;
+        if (area > bestArea) {
+            bestArea = area;
+            best = window;
+        }
+    }
+
+    return best;
+}
+
+/// Guarantees that key ends up on something that can route touches. The preferred
+/// window is tried first because it is the one that had key before we interfered;
+/// if it has since been torn down, the biggest normal window takes over. Returning
+/// nil means nothing could be restored, which is worth a log line of its own.
++ (nullable UIWindow *)ensureKeyWindow:(UIWindow *)preferred {
+    if ([self restoreKeyWindow:preferred]) {
+        return preferred;
+    }
+
+    NSArray<UIWindow *> *windows = [self applicationWindows];
+    UIWindow *current = [self keyWindowInWindows:windows excludingFloating:YES];
+    if (current) {
+        return current;
+    }
+
+    UIWindow *primary = [self primaryWindowInWindows:windows];
+    if (!primary) {
+        KayokoFloatLog(@"shellx", @"no window left to hold key");
+        return nil;
+    }
+
+    [self restoreKeyWindow:primary];
+    KayokoFloatLog(@"shellx", [NSString stringWithFormat:@"key rescued by %@", NSStringFromClass([primary class])]);
+    return primary;
+}
+
++ (nullable NSString *)floatingWindowDescriptionInWindows:(NSArray<UIWindow *> *)windows {
+    Class windowClass = objc_getClass([kKayokoShellXFloatingWindowClassName UTF8String]);
+    if (!windowClass) {
+        return @"none";
+    }
+
+    for (UIWindow *window in windows) {
+        if (![window isKindOfClass:windowClass]) {
+            continue;
+        }
+
+        return [NSString stringWithFormat:@"%@ level=%.0f %@ hidden=%d key=%d", NSStringFromClass([window class]),
+                                          window.windowLevel, NSStringFromCGRect(window.frame), window.isHidden,
+                                          window.isKeyWindow];
+    }
+
+    return @"none";
+}
+
++ (nullable NSString *)keyWindowDescriptionInWindows:(NSArray<UIWindow *> *)windows {
+    for (UIWindow *window in windows) {
+        if (window.isKeyWindow) {
+            return NSStringFromClass([window class]);
+        }
+    }
+
+    return @"none";
+}
+
 + (nullable id)sharedInstanceOfClass:(Class)classObject selectorName:(NSString *)selectorName {
     if (!classObject || [selectorName length] == 0) {
         return nil;
@@ -688,6 +878,115 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     }
 
     return nil;
+}
+
+#pragma mark - Snapper 3 snap placement
+
+/// Every snap view inside the window. Snapper's class name is obfuscated, so the
+/// identifier has to be behavioural: only its snap views answer to
+/// `-setOriginalCenterPoint:`, which is the property its drag handler springs
+/// back to.
++ (NSArray<UIView *> *)snapViewsInWindow:(UIWindow *)window {
+    // NSSelectorFromString rather than @selector here: the selector is declared
+    // nowhere in this project, and -Wundeclared-selector would be fatal under
+    // the CI's -Werror.
+    SEL marker = NSSelectorFromString(@"setOriginalCenterPoint:");
+    NSMutableArray<UIView *> *matches = [NSMutableArray array];
+    NSMutableArray<UIView *> *queue = [NSMutableArray arrayWithArray:[window subviews]];
+    NSUInteger guard = 0;
+
+    while ([queue count] > 0 && guard < 4000) {
+        guard += 1;
+        UIView *candidate = [queue lastObject];
+        [queue removeLastObject];
+        if ([candidate respondsToSelector:marker]) {
+            [matches addObject:candidate];
+        }
+
+        [queue addObjectsFromArray:[candidate subviews]];
+    }
+
+    return matches;
+}
+
+/// The snap that was not there before the call. Comparing against a snapshot is
+/// how the old snaps, which stay on screen on purpose, are told apart from the
+/// one that was just created.
++ (nullable UIView *)snapViewAddedSince:(NSArray<UIView *> *)existing inWindow:(UIWindow *)window {
+    for (UIView *view in [[self snapViewsInWindow:window] reverseObjectEnumerator]) {
+        if (![existing containsObject:view]) {
+            return view;
+        }
+    }
+
+    return nil;
+}
+
+/// Puts the new snap on the screen centre.
+///
+/// Two things make this a delayed operation rather than a single assignment: the
+/// snap view can be added a runloop turn after the overlay counts it, and Snapper
+/// lays it out again once the image finishes loading, which moves it back to its
+/// cascade slot. Hence a short retry to find it, then a second correction that
+/// only fires if it actually drifted - so it never fights a finger that has
+/// already grabbed the snap.
++ (BOOL)centerNewestSnapInWindow:(UIWindow *)window
+                           image:(UIImage *)image
+                        existing:(NSArray<UIView *> *)existing
+                         attempt:(NSUInteger)attempt {
+    UIView *snapView = [self snapViewAddedSince:existing inWindow:window];
+    if (!snapView) {
+        if (attempt < 3) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((0.1 + 0.1 * attempt) * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                               [self centerNewestSnapInWindow:window image:image existing:existing attempt:attempt + 1];
+                           });
+            return NO;
+        }
+
+        snapView = [[self snapViewsInWindow:window] lastObject];
+        if (!snapView) {
+            KayokoFloatLog(@"snapper", @"no snap view to centre");
+            return NO;
+        }
+
+        KayokoFloatLog(@"snapper", @"no new snap view, centring the newest existing one");
+    }
+
+    CGRect frame = [self floatingFrameForImage:image];
+    CGPoint target = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
+    UIView *coordinateSpace = snapView.superview ?: window;
+    CGPoint targetInSpace = [coordinateSpace convertPoint:target fromView:window];
+    CGPoint before = snapView.center;
+
+    snapView.center = targetInSpace;
+    [self invokePointSelector:NSSelectorFromString(@"setOriginalCenterPoint:") onTarget:snapView point:targetInSpace];
+
+    KayokoFloatLog(@"snapper",
+                   [NSString stringWithFormat:@"centre %@ %@ -> %@ (target %@)", NSStringFromClass([snapView class]),
+                                              NSStringFromCGPoint(before), NSStringFromCGPoint(snapView.center),
+                                              NSStringFromCGPoint(target)]);
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.28 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        CGPoint current = snapView.center;
+        if (fabs(current.x - targetInSpace.x) < 1.0 && fabs(current.y - targetInSpace.y) < 1.0) {
+            return;
+        }
+
+        snapView.center = targetInSpace;
+        [self invokePointSelector:NSSelectorFromString(@"setOriginalCenterPoint:")
+                         onTarget:snapView
+                            point:targetInSpace];
+        KayokoFloatLog(@"snapper",
+                       [NSString stringWithFormat:@"centre re-applied from %@ to %@", NSStringFromCGPoint(current),
+                                                  NSStringFromCGPoint(targetInSpace)]);
+    });
+
+    return YES;
+}
+
++ (BOOL)centerNewestSnapInWindow:(UIWindow *)window image:(UIImage *)image existing:(NSArray<UIView *> *)existing {
+    return [self centerNewestSnapInWindow:window image:image existing:existing attempt:0];
 }
 
 + (nullable id)valueForKey:(NSString *)key onTarget:(id)target {
@@ -877,6 +1176,35 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     [invocation setArgument:&rectArgument atIndex:3];
     CGPoint centerArgument = center;
     [invocation setArgument:&centerArgument atIndex:4];
+    [invocation invoke];
+    return YES;
+}
+
+/// And for a single `{CGPoint}` argument, which is how Snapper's snap views are
+/// told where their resting position is. The struct has to travel through an
+/// `NSInvocation`: `-performSelector:withObject:` cannot carry it.
++ (BOOL)invokePointSelector:(SEL)selector onTarget:(id)target point:(CGPoint)point {
+    if (!target || !selector || ![target respondsToSelector:selector]) {
+        return NO;
+    }
+
+    NSMethodSignature *signature = [target methodSignatureForSelector:selector];
+    if (!signature || [signature numberOfArguments] != [self argumentCountForSelector:selector] ||
+        [signature numberOfArguments] < 3) {
+        KayokoFloatLog(@"reflect", [self signatureDescriptionForSelector:selector onTarget:target]);
+        return NO;
+    }
+
+    if (![self isCGPointArgumentType:[signature getArgumentTypeAtIndex:2]]) {
+        KayokoFloatLog(@"reflect", [self signatureDescriptionForSelector:selector onTarget:target]);
+        return NO;
+    }
+
+    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+    [invocation setTarget:target];
+    [invocation setSelector:selector];
+    CGPoint argument = point;
+    [invocation setArgument:&argument atIndex:2];
     [invocation invoke];
     return YES;
 }
