@@ -53,10 +53,10 @@ static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.sna
 + (NSUInteger)snapper3SnapCountForWindow:(id)window;
 + (BOOL)invokeSelector:(SEL)selector onTarget:(id)target image:(UIImage *)image rect:(CGRect)rect;
 + (BOOL)invokeSelector:(SEL)selector
-+              onTarget:(id)target
-+                 image:(UIImage *)image
-+                  rect:(CGRect)rect
-+                center:(CGPoint)center;
+              onTarget:(id)target
+                 image:(UIImage *)image
+                  rect:(CGRect)rect
+                center:(CGPoint)center;
 + (BOOL)isCGRectArgumentType:(const char *)argumentType;
 + (BOOL)isCGPointArgumentType:(const char *)argumentType;
 + (BOOL)boolForSelector:(SEL)selector onTarget:(id)target;
