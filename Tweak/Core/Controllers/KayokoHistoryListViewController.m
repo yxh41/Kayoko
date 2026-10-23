@@ -16,6 +16,19 @@
 #import "KayokoTableViewCellContent.h"
 #import "KayokoTableViewCellContentProvider.h"
 
+/// Faircopy's panel URL scheme. Faircopy's WritingTools injector intercepts
+/// this scheme in-process and presents its panel with `keyword` as the text,
+/// so a Kayoko clip can be handed over without a pasteboard round-trip.
+static NSString *const kKayokoFaircopyPanelURLString = @"faircopy://panel";
+
+/// Fallback for clips too long to ride in a URL: fill the pasteboard and post
+/// this notification. Faircopy's standalone panel reads the pasteboard when it
+/// is summoned with no keyword. (Same cross-process channel Kayoko itself uses.)
+static NSString *const kKayokoFaircopyPresentNotification = @"wiki.qaq.faircopy.present";
+
+/// Past this length a URL stops being a sane transport; switch to the pasteboard.
+static const NSUInteger kKayokoFaircopyKeywordLengthLimit = 1000;
+
 NS_ASSUME_NONNULL_BEGIN
 
 @interface KayokoHistoryListViewController () <UITableViewDelegate, UITableViewDataSource>
@@ -788,6 +801,11 @@ NS_ASSUME_NONNULL_END
         [actions addObject:noteAction];
     }
 
+    UIContextualAction *faircopyAction = [self faircopyActionForItem:item];
+    if (faircopyAction) {
+        [actions addObject:faircopyAction];
+    }
+
     UIContextualAction *saveAction = [self saveActionForItem:item];
     if (saveAction) {
         [actions addObject:saveAction];
@@ -936,6 +954,58 @@ NS_ASSUME_NONNULL_END
     [linkAction setImage:[UIImage systemImageNamed:@"arrow.up"]];
     [linkAction setBackgroundColor:[UIColor systemGreenColor]];
     return linkAction;
+}
+
+- (nullable UIContextualAction *)faircopyActionForItem:(KayokoPasteboardItem *)item {
+    NSString *content = [item content];
+    // Only plain text can be handed over: Faircopy's keyword is a string and
+    // an image clip has no text to send.
+    if ([content length] == 0 || [[item imageName] length] > 0) {
+        return nil;
+    }
+
+    UIContextualAction *faircopyAction = [UIContextualAction
+        contextualActionWithStyle:UIContextualActionStyleNormal
+                            title:@""
+                          handler:^(__unused UIContextualAction *action, __unused __kindof UIView *sourceView,
+                                    void (^completionHandler)(BOOL)) {
+                            [self sendContentToFaircopy:content];
+                            // Kayoko gets out of the way; Faircopy's panel
+                            // takes over the foreground.
+                            [[self delegate] historyListViewControllerDidRequestHide:self];
+                            if (completionHandler) {
+                                completionHandler(YES);
+                            }
+                          }];
+    [faircopyAction setImage:[UIImage systemImageNamed:@"sparkles"]];
+    [faircopyAction setBackgroundColor:[UIColor systemPurpleColor]];
+    return faircopyAction;
+}
+
+/// Hands one clipboard item to Faircopy.
+///
+/// Short clips travel in the URL, which Faircopy's injector intercepts so the
+/// panel is presented already filled in. Longer clips would make an absurd URL,
+/// so those go the other way: write the clip to the pasteboard and post
+/// Faircopy's present notification, whose standalone panel falls back to the
+/// pasteboard contents.
+- (void)sendContentToFaircopy:(NSString *)content {
+    if ([content length] <= kKayokoFaircopyKeywordLengthLimit) {
+        NSURLComponents *components = [NSURLComponents componentsWithString:kKayokoFaircopyPanelURLString];
+        [components setQueryItems:@[ [NSURLQueryItem queryItemWithName:@"keyword" value:content] ]];
+        NSURL *URL = [components URL];
+        if (URL) {
+            [[UIApplication sharedApplication] openURL:URL options:@{} completionHandler:nil];
+            return;
+        }
+    }
+
+    [[UIPasteboard generalPasteboard] setString:content];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         (__bridge CFStringRef)kKayokoFaircopyPresentNotification,
+                                         NULL,
+                                         NULL,
+                                         YES);
 }
 
 #pragma mark - Gestures
