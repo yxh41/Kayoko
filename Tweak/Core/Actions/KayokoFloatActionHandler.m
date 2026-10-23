@@ -77,6 +77,7 @@ static NSString *const kKayokoFloatLogPath = @"/var/mobile/Library/com.82flex.ka
 
 + (BOOL)isFloatingWindow:(UIWindow *)window;
 + (nullable UIWindow *)keyWindowInWindows:(NSArray<UIWindow *> *)windows excludingFloating:(BOOL)excludingFloating;
++ (BOOL)windowCanBecomeKey:(UIWindow *)window;
 + (BOOL)restoreKeyWindow:(UIWindow *)window;
 + (nullable UIWindow *)primaryWindowInWindows:(NSArray<UIWindow *> *)windows;
 + (nullable UIWindow *)ensureKeyWindow:(UIWindow *)preferred;
@@ -734,6 +735,21 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     return nil;
 }
 
+/// `-canBecomeKeyWindow` was only made public in iOS 15, and this tweak builds
+/// against an older deployment target. Below 15 every window could always become
+/// key, so the honest answer there is simply yes.
++ (BOOL)windowCanBecomeKey:(UIWindow *)window {
+    if (![window isKindOfClass:[UIWindow class]]) {
+        return NO;
+    }
+
+    if (@available(iOS 15.0, *)) {
+        return window.canBecomeKeyWindow;
+    }
+
+    return YES;
+}
+
 + (BOOL)restoreKeyWindow:(UIWindow *)window {
     if (![window isKindOfClass:[UIWindow class]]) {
         return NO;
@@ -743,7 +759,7 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
         return YES;
     }
 
-    if (!window.canBecomeKeyWindow) {
+    if (![self windowCanBecomeKey:window]) {
         return NO;
     }
 
@@ -759,7 +775,7 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     CGFloat bestArea = 0;
 
     for (UIWindow *window in windows) {
-        if (window.isHidden || [self isFloatingWindow:window] || !window.canBecomeKeyWindow) {
+        if (window.isHidden || [self isFloatingWindow:window] || ![self windowCanBecomeKey:window]) {
             continue;
         }
 
