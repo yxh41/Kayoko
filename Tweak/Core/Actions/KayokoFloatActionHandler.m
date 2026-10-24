@@ -56,6 +56,10 @@ static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.sna
 
 static NSString *const kKayokoFloatLogPath = @"/var/mobile/Library/com.82flex.kayoko/float.log";
 
+/// Present means "diagnostics on". Absent (the normal case) means the log writer
+/// returns immediately without touching the filesystem.
+static NSString *const kKayokoFloatDebugMarkerPath = @"/var/mobile/Library/com.82flex.kayoko/float.debug";
+
 @interface KayokoFloatActionHandler ()
 
 + (NSUserDefaults *)preferences;
@@ -116,12 +120,38 @@ static NSString *const kKayokoFloatLogPath = @"/var/mobile/Library/com.82flex.ka
 
 @end
 
-/// One line per attempt, appended to a file. Counting properties only tell us
-/// that a call was accepted, not that anything appeared; when neither is
-/// conclusive this log is the difference between guessing and knowing.
+/// Diagnostics are off by default. While the two hand-offs were being reverse
+/// engineered this file was the only honest signal available, so it earned its
+/// cost; now it would just be one write per swipe forever.
+///
+/// Creating the marker file turns every line back on:
+///
+///     touch /var/mobile/Library/com.82flex.kayoko/float.debug
+///
+/// The check is a single `stat` on a path that normally does not exist, and the
+/// stale log is deleted once so an old file cannot be mistaken for a fresh run.
+static BOOL KayokoFloatLogEnabled(void) {
+    static dispatch_once_t cleanupToken;
+    dispatch_once(&cleanupToken, ^{
+        NSFileManager *fileManager = [NSFileManager defaultManager];
+        if (![fileManager fileExistsAtPath:jbroot(kKayokoFloatDebugMarkerPath)]) {
+            NSString *staleLog = jbroot(kKayokoFloatLogPath);
+            if ([fileManager fileExistsAtPath:staleLog]) {
+                [fileManager removeItemAtPath:staleLog error:nil];
+            }
+        }
+    });
+
+    return [[NSFileManager defaultManager] fileExistsAtPath:jbroot(kKayokoFloatDebugMarkerPath)];
+}
+
 static void KayokoFloatLog(NSString *step, NSString *detail) {
-    NSString *path = jbroot(kKayokoFloatLogPath);
+    if (!KayokoFloatLogEnabled()) {
+        return;
+    }
+
     NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSString *path = jbroot(kKayokoFloatLogPath);
     NSString *directory = [path stringByDeletingLastPathComponent];
     if (![fileManager fileExistsAtPath:directory]) {
         [fileManager createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
@@ -570,18 +600,22 @@ static BOOL KayokoFloatKeySuppressor(id self, SEL _cmd) {
 
     // Three samples, because the failure that matters is a freeze: the last line
     // that made it into the file is the moment the device stopped, and the float
-    // state at each step says whether it vanished before or after that.
-    for (NSNumber *delay in @[ @0.15, @0.7, @1.6 ]) {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)([delay doubleValue] * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-                           KayokoFloatLog(@"shellx watch",
-                                          [NSString stringWithFormat:@"t=%.2fs float=%@ key=%@",
-                                                                     [delay doubleValue],
-                                                                     [self floatingWindowDescriptionInWindows:
-                                                                               [self applicationWindows]],
-                                                                     [self keyWindowDescriptionInWindows:
-                                                                               [self applicationWindows]]]);
-                       });
+    // state at each step says whether it vanished before or after that. Only
+    // scheduled when diagnostics are switched on, so nothing is queued in normal
+    // use.
+    if (KayokoFloatLogEnabled()) {
+        for (NSNumber *delay in @[ @0.15, @0.7, @1.6 ]) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)([delay doubleValue] * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                               KayokoFloatLog(@"shellx watch",
+                                              [NSString stringWithFormat:@"t=%.2fs float=%@ key=%@",
+                                                                         [delay doubleValue],
+                                                                         [self floatingWindowDescriptionInWindows:
+                                                                                   [self applicationWindows]],
+                                                                         [self keyWindowDescriptionInWindows:
+                                                                                   [self applicationWindows]]]);
+                           });
+        }
     }
 
     return afterCount > beforeCount || visibleAfter > visibleBefore;
