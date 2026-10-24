@@ -626,10 +626,10 @@ static BOOL KayokoFloatKeySuppressor(id self, SEL _cmd) {
                                               showingAfter, croppingBefore, croppingAfter]);
 
     if (invoked && (snapsAfter > snapsBefore || (!showingBefore && showingAfter) || (!croppingBefore && croppingAfter))) {
-        // Which pixels and where they land are two separate decisions in
-        // Snapper: the rect only picks the pixels, the position comes from its
-        // own cascade counter (`santaCount`), so a new snap shows up wherever
-        // the previous ones left off. Put it on the centre explicitly.
+        // Which pixels and where they land are two separate decisions in Snapper:
+        // the rect only picks the pixels, the position comes from its own cascade
+        // counter (`santaCount`), so a new snap shows up wherever the previous ones
+        // left off. Placing it is therefore a second, separate step.
         [self centerNewestSnapInWindow:window image:image existing:existingSnapViews];
         return YES;
     }
@@ -652,6 +652,70 @@ static BOOL KayokoFloatKeySuppressor(id self, SEL _cmd) {
     }
 
     return NO;
+}
+
+/// Sizes the snap to fit the screen and puts it in the middle.
+///
+/// Snapper shows a new snap at its own scale, so a tall screenshot can come back
+/// taller than the screen and hang off both ends. The cap only ever shrinks -
+/// enlarging is the user's job, done by pinching, because upscaling a small clip
+/// to fill the screen would be the wrong guess every time.
+///
+/// Size is measured from `frame` (the visual size, transform included) but written
+/// to `bounds`, so a snap Snapper has already scaled still lands inside the cap.
+/// Returns YES when anything actually had to change. The image is not needed here:
+/// the cap is derived from the view's own displayed size, which is whatever
+/// Snapper decided to use for this image.
++ (BOOL)placeSnapView:(UIView *)snapView window:(UIWindow *)window log:(BOOL)log {
+    if (![snapView isKindOfClass:[UIView class]]) {
+        return NO;
+    }
+
+    CGSize screenSize = [UIScreen mainScreen].bounds.size;
+    CGSize maximumSize = CGSizeMake(floor(screenSize.width * 0.72), floor(screenSize.height * 0.62));
+    CGSize visualSize = snapView.frame.size;
+    CGSize boundsSize = snapView.bounds.size;
+    CGSize sizeBefore = visualSize;
+
+    CGFloat factor = 1.0;
+    if (visualSize.width > maximumSize.width && visualSize.width > 0.0) {
+        factor = MIN(factor, maximumSize.width / visualSize.width);
+    }
+    if (visualSize.height > maximumSize.height && visualSize.height > 0.0) {
+        factor = MIN(factor, maximumSize.height / visualSize.height);
+    }
+
+    BOOL changed = NO;
+    if (factor < 1.0 && boundsSize.width > 0.0 && boundsSize.height > 0.0) {
+        CGSize capped = CGSizeMake(floor(boundsSize.width * factor), floor(boundsSize.height * factor));
+        if (capped.width >= 1.0 && capped.height >= 1.0) {
+            snapView.bounds = CGRectMake(0.0, 0.0, capped.width, capped.height);
+            [snapView setNeedsLayout];
+            changed = YES;
+        }
+    }
+
+    CGPoint centre = CGPointMake(floor(screenSize.width * 0.5), floor(screenSize.height * 0.5));
+    CGPoint targetInSpace = [(snapView.superview ?: window) convertPoint:centre fromView:window];
+    if (fabs(snapView.center.x - targetInSpace.x) > 0.5 || fabs(snapView.center.y - targetInSpace.y) > 0.5) {
+        snapView.center = targetInSpace;
+        changed = YES;
+    }
+
+    // Also the resting point, so dragging and releasing springs back to the middle
+    // instead of to wherever Snapper's cascade had put it.
+    [self invokePointSelector:NSSelectorFromString(@"setOriginalCenterPoint:")
+                     onTarget:snapView
+                        point:targetInSpace];
+
+    if (log) {
+        KayokoFloatLog(@"snapper",
+                       [NSString stringWithFormat:@"place %@ size %@->%@ centre %@ (cap %@)", NSStringFromClass([snapView class]),
+                                                  NSStringFromCGSize(sizeBefore), NSStringFromCGSize(snapView.frame.size),
+                                                  NSStringFromCGPoint(targetInSpace), NSStringFromCGSize(maximumSize)]);
+    }
+
+    return changed;
 }
 
 #pragma mark - Window and singleton discovery
@@ -679,7 +743,12 @@ static BOOL KayokoFloatKeySuppressor(id self, SEL _cmd) {
             [invocation setArgument:&visibleOnly atIndex:3];
             [invocation invoke];
 
-            id result = nil;
+            // __unsafe_unretained, not a plain id: `-getReturnValue:` copies the
+            // pointer in without ARC retaining it, while a `__strong` local is
+            // assumed to own its value and is released at scope exit. That one
+            // extra release was deallocating the array UIKit had just handed us,
+            // i.e. corrupting SpringBoard's window bookkeeping on every swipe.
+            __unsafe_unretained id result = nil;
             [invocation getReturnValue:&result];
             if ([result isKindOfClass:[NSArray class]]) {
                 for (id candidate in (NSArray *)result) {
@@ -974,7 +1043,15 @@ static BOOL KayokoFloatKeySuppressor(id self, SEL _cmd) {
     [invocation setSelector:selector];
     [invocation invoke];
 
-    id result = nil;
+    // `__unsafe_unretained` is the whole point here, not a style choice.
+    // `-getReturnValue:` writes the pointer into this variable directly, so ARC
+    // never retains it - but a `__strong` local is assumed to own its value and
+    // gets released when the method returns. For `+shared` that single extra
+    // release was enough to deallocate ShellX's singleton: the floating window it
+    // owned went with it (the image vanished ~0.5s after appearing), and the next
+    // call read a dangling pointer at that address - which is why one run logged
+    // the manager's class as `UNPushNotificationTrigger`.
+    __unsafe_unretained id result = nil;
     [invocation getReturnValue:&result];
     return result;
 }
@@ -1075,33 +1152,15 @@ static BOOL KayokoFloatKeySuppressor(id self, SEL _cmd) {
         KayokoFloatLog(@"snapper", @"no new snap view, centring the newest existing one");
     }
 
-    CGRect frame = [self floatingFrameForImage:image];
-    CGPoint target = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
-    UIView *coordinateSpace = snapView.superview ?: window;
-    CGPoint targetInSpace = [coordinateSpace convertPoint:target fromView:window];
-    CGPoint before = snapView.center;
-
-    snapView.center = targetInSpace;
-    [self invokePointSelector:NSSelectorFromString(@"setOriginalCenterPoint:") onTarget:snapView point:targetInSpace];
-
-    KayokoFloatLog(@"snapper",
-                   [NSString stringWithFormat:@"centre %@ %@ -> %@ (target %@)", NSStringFromClass([snapView class]),
-                                              NSStringFromCGPoint(before), NSStringFromCGPoint(snapView.center),
-                                              NSStringFromCGPoint(target)]);
+    [self placeSnapView:snapView window:window log:YES];
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.28 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        CGPoint current = snapView.center;
-        if (fabs(current.x - targetInSpace.x) < 1.0 && fabs(current.y - targetInSpace.y) < 1.0) {
-            return;
+        // Snapper lays the snap out again once the image finishes loading, which can
+        // both move it and restore its original size. Only an actual change is
+        // reported, so a snap the user has already grabbed is never fought over.
+        if ([self placeSnapView:snapView window:window log:NO]) {
+            KayokoFloatLog(@"snapper", @"placement re-applied after Snapper's own layout");
         }
-
-        snapView.center = targetInSpace;
-        [self invokePointSelector:NSSelectorFromString(@"setOriginalCenterPoint:")
-                         onTarget:snapView
-                            point:targetInSpace];
-        KayokoFloatLog(@"snapper",
-                       [NSString stringWithFormat:@"centre re-applied from %@ to %@", NSStringFromCGPoint(current),
-                                                  NSStringFromCGPoint(targetInSpace)]);
     });
 
     return YES;
