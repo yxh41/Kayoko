@@ -18,6 +18,8 @@
 #import "KayokoTableViewCellContent.h"
 #import "KayokoTableViewCellContentProvider.h"
 
+#import <dlfcn.h>
+
 /// Faircopy's panel URL scheme. Faircopy's WritingTools injector intercepts
 /// this scheme in-process and presents its panel with `keyword` as the text,
 /// so a Kayoko clip can be handed over without a pasteboard round-trip.
@@ -77,6 +79,89 @@ static NSString *const kKayokoFaircopyOCRRequestNotification = @"wiki.qaq.fairco
 /// 0.2-1.2 s); silence means it was jetsammed or has not been opened since
 /// install, and the app switch is then the only way to get the picture read.
 static const NSTimeInterval kKayokoFaircopyOCRSilentWait = 2.0;
+
+/// 4.3.25: which app the panel belongs on.
+///
+/// This list is a SpringBoard window drawn on top of whatever the user is
+/// looking at (`KayokoCore.plist` injects SpringBoard only), so "here" is NOT
+/// SpringBoard: the panel has to be presented by the app underneath, or it
+/// lands on SpringBoard's layer beneath that app's window and the user sees
+/// nothing until they go back to the home screen.
+///
+/// AIGate cannot answer this itself — it is a background process, not the
+/// workspace — so the answer travels in a file beside the picture.
+///
+/// KEEP IN SYNC with FaircopyImageOCR.displayTargetPath.
+static NSString *const kKayokoFaircopyOCRDisplayTargetPath =
+    @"/var/mobile/Library/Preferences/wiki.qaq.ai.gate/faircopy_ocr_target.txt";
+
+/// The bundle id of the app currently in front, or nil when it cannot be read.
+///
+/// Three sources, because the private entry points move between releases:
+/// the SpringBoardServices C function, then the workspace object (both KVC
+/// spellings in use), then the application controller.
+static NSString *KayokoFaircopyFrontmostBundleIdentifier(void) {
+    static CFStringRef (*frontmostDisplayIdentifier)(void) = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+      void *handle = dlopen(
+          "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
+          RTLD_LAZY);
+      if (handle) {
+          frontmostDisplayIdentifier =
+              (CFStringRef (*)(void))dlsym(handle, "SBFrontmostApplicationDisplayIdentifier");
+      }
+    });
+    if (frontmostDisplayIdentifier) {
+        CFStringRef bundle = frontmostDisplayIdentifier();
+        if (bundle) {
+            NSString *value = [(__bridge NSString *)bundle copy];
+            CFRelease(bundle);
+            if (value.length > 0) {
+                return value;
+            }
+        }
+    }
+
+    NSArray<NSString *> *classNames = @[ @"SBWorkspace", @"SBApplicationController" ];
+    NSArray<NSString *> *keys = @[ @"frontmostApplication", @"_frontmostApplication" ];
+    for (NSString *className in classNames) {
+        Class cls = NSClassFromString(className);
+        if (![cls respondsToSelector:@selector(sharedInstance)]) {
+            continue;
+        }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        id shared = [cls performSelector:@selector(sharedInstance)];
+#pragma clang diagnostic pop
+        for (NSString *key in keys) {
+            @try {
+                id application = [shared valueForKey:key];
+                NSString *bundle = [application valueForKey:@"bundleIdentifier"];
+                if ([bundle isKindOfClass:[NSString class]] && bundle.length > 0) {
+                    return bundle;
+                }
+            } @catch (__unused NSException *exception) {
+                // A missing key is the normal case for one of the two spellings.
+            }
+        }
+    }
+    return nil;
+}
+
+/// Leaves the answer where AIGate can read it. SpringBoard is the honest
+/// fallback: with no app in front, that is exactly where the user is.
+static NSString *KayokoWriteFaircopyOCRDisplayTarget(void) {
+    NSString *bundle = KayokoFaircopyFrontmostBundleIdentifier();
+    if (bundle.length == 0) {
+        bundle = @"com.apple.springboard";
+    }
+    [bundle writeToFile:kKayokoFaircopyOCRDisplayTargetPath
+             atomically:YES
+               encoding:NSUTF8StringEncoding
+                  error:nil];
+    return bundle;
+}
 
 /// A hand-off that dies mid-flight (AIGate killed by jetsam, bounce lost) must
 /// not leave the pill spinning on the home screen forever.
@@ -1268,6 +1353,11 @@ NS_ASSUME_NONNULL_END
     KayokoObserveFaircopyOCRResult();
     gKayokoFaircopyOCRHandoffPending = YES;
     gKayokoFaircopyOCRVisibleRoadIssued = NO;
+
+    // 4.3.25: before anything is asked, leave AIGate the app the panel belongs
+    // on. Without it the panel is addressed to SpringBoard and ends up under
+    // the window the user is actually looking at.
+    KayokoWriteFaircopyOCRDisplayTarget();
 
     // The picture is already in the drop box; the notification only says
     // "there is work". AIGate's process is woken by it without being shown.
