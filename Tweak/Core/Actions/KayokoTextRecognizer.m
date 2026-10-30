@@ -54,6 +54,22 @@ static const CGFloat kKayokoRecognitionMaxUpscale = 3.0;
 static NSString *const kKayokoRecognitionLanguageChinese = @"zh-Hans";
 static NSString *const kKayokoRecognitionLanguageEnglish = @"en-US";
 
+/// Raw values of `VNRequestTextRecognitionLevel`.
+///
+/// Accurate is **0** and fast is **1** — the opposite of what the names suggest,
+/// and the opposite of what 4.3.15 through 4.3.18 assumed. Every pass therefore
+/// ran at the fast level, and the fast level only ships English, Portuguese,
+/// French, Italian, German and Spanish: assigning
+/// `recognitionLanguages = @[@"zh-Hans"]` to a fast request is silently ignored
+/// rather than rejected, the English model reads the picture, and Chinese comes
+/// back as Latin approximations ("凡人修仙传" → "nAlI°ILtIl*") at high confidence.
+///
+/// The probe line in the OCR log was the dead giveaway: it listed exactly the six
+/// fast-level languages. Tuning confidence thresholds and reading order could
+/// never have helped, because the Chinese model was never asked to run.
+static const NSInteger kKayokoRecognitionLevelAccurate = 0;
+static const NSInteger kKayokoRecognitionLevelFast = 1;
+
 /// Observations below this confidence are noise: a single misread glyph on a
 /// busy background, or the residue of a gradient. Dropping them beats handing
 /// the user a stray character to delete.
@@ -228,10 +244,11 @@ static void KayokoOCRAppendLog(NSString *line) {
 
 /// Records what Vision claims to support, once per process.
 ///
-/// If this line lists zh-Hans, the model is there and the problem is elsewhere.
-/// If it does not, no amount of tuning in this file will ever produce Chinese —
-/// the only options left are doing the OCR in another process or dropping the
-/// feature.
+/// Both levels are written because the pair is the whole diagnosis: accurate
+/// listing zh-Hans means the model is there; a fast list of six Latin languages
+/// and nothing else means the request was built at the wrong level. 4.3.18 logged
+/// a single line and it was read as "this device has no Chinese", which sent the
+/// fix toward the model instead of toward the enum.
 static void KayokoLogSupportedLanguages(void) {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -243,20 +260,60 @@ static void KayokoLogSupportedLanguages(void) {
       if ([(id)requestClass respondsToSelector:@selector(currentRevision)]) {
           revision = [(id)requestClass currentRevision];
       }
-      NSArray *supported = nil;
-      NSError *error = nil;
-      if ([(id)requestClass respondsToSelector:
-                                 @selector(supportedRecognitionLanguagesForTextRecognitionLevel:revision:error:)]) {
-          supported = [(id)requestClass supportedRecognitionLanguagesForTextRecognitionLevel:1
-                                                                                   revision:revision
-                                                                                      error:&error];
+      SEL probe = @selector(supportedRecognitionLanguagesForTextRecognitionLevel:revision:error:);
+      if (![(id)requestClass respondsToSelector:probe]) {
+          KayokoOCRAppendLog([NSString stringWithFormat:@"supported r%lu = (probe missing)",
+                                                                (unsigned long)revision]);
+          return;
       }
-      KayokoOCRAppendLog([NSString stringWithFormat:@"supported r%lu = %@",
-                                                    (unsigned long)revision,
-                                                    [supported componentsJoinedByString:@","]
-                                                        ?: @"(query failed)"]);
+      NSArray<NSNumber *> *levels = @[
+          @(kKayokoRecognitionLevelAccurate),
+          @(kKayokoRecognitionLevelFast),
+      ];
+      for (NSNumber *level in levels) {
+          NSError *error = nil;
+          NSArray *supported =
+              [(id)requestClass supportedRecognitionLanguagesForTextRecognitionLevel:level.integerValue
+                                                                           revision:revision
+                                                                              error:&error];
+          NSString *name = level.integerValue == kKayokoRecognitionLevelAccurate ? @"accurate" : @"fast";
+          KayokoOCRAppendLog([NSString stringWithFormat:@"supported r%lu %@ = %@",
+                                                        (unsigned long)revision,
+                                                        name,
+                                                        [supported componentsJoinedByString:@","]
+                                                            ?: @"(query failed)"]);
+      }
     });
 }
+
+/// Whether the accurate level advertises the Chinese model.
+///
+/// Nothing else in this file can tell the two failures apart by looking at the
+/// output: an unsupported language is not an error, Vision just keeps its
+/// default and returns confident Latin. Recorded so a bad run is explainable
+/// from the device, and so the per-pass log line can be read honestly.
+static BOOL KayokoAccurateLevelSupportsChinese(void) {
+    static dispatch_once_t onceToken;
+    static BOOL supported = NO;
+    dispatch_once(&onceToken, ^{
+      Class requestClass = NSClassFromString(@"VNRecognizeTextRequest");
+      SEL probe = @selector(supportedRecognitionLanguagesForTextRecognitionLevel:revision:error:);
+      if (!requestClass || ![(id)requestClass respondsToSelector:probe]) {
+          return;
+      }
+      NSUInteger revision = 0;
+      if ([(id)requestClass respondsToSelector:@selector(currentRevision)]) {
+          revision = [(id)requestClass currentRevision];
+      }
+      NSArray *list =
+          [(id)requestClass supportedRecognitionLanguagesForTextRecognitionLevel:kKayokoRecognitionLevelAccurate
+                                                                       revision:revision
+                                                                          error:NULL];
+      supported = [list containsObject:kKayokoRecognitionLanguageChinese];
+    });
+    return supported;
+}
+
 
 @implementation KayokoTextRecognizer
 + (BOOL)isAvailable {
@@ -315,10 +372,11 @@ static void KayokoLogSupportedLanguages(void) {
 /// the nearest Latin approximation. Forcing zh-Hans alone removes the choice:
 /// that model also reads Latin text, so mixed screenshots still come out whole.
 ///
-/// `revision` is only set where noted; 0 means "leave whatever the system
-/// defaults to". Revision 1 ships the original iOS 13 model, which is weaker but
-/// is the one that definitely carries Chinese — kept as the last resort in case
-/// the current revision's model cannot be loaded in a non-app process.
+/// `revision` 0 means "leave the system default" (revision 3 on iOS 16).
+/// Revision 2 is the fallback rather than revision 1 because revision 1 is
+/// English-only — it can never return Chinese, so falling back to it would just
+/// burn a few hundred milliseconds and produce the exact Latin soup this whole
+/// exercise is about.
 + (NSArray<NSDictionary<NSString *, id> *> *)recognitionAttempts {
     return @[
         @{@"languages" : @[ kKayokoRecognitionLanguageChinese ], @"correction" : @YES, @"revision" : @0},
@@ -326,7 +384,7 @@ static void KayokoLogSupportedLanguages(void) {
         @{@"languages" : @[ kKayokoRecognitionLanguageChinese, kKayokoRecognitionLanguageEnglish ],
           @"correction" : @YES,
           @"revision" : @0},
-        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ], @"correction" : @YES, @"revision" : @1},
+        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ], @"correction" : @YES, @"revision" : @2},
         @{@"languages" : @[ kKayokoRecognitionLanguageEnglish ], @"correction" : @YES, @"revision" : @0},
     ];
 }
@@ -405,7 +463,7 @@ static void KayokoLogSupportedLanguages(void) {
           bestText.length > 0 ? @"ok" : @"empty",
           [[NSDate date] timeIntervalSinceDate:startedAt] * 1000.0,
           (unsigned long)bestText.length, bestQuality, bestPass ?: @"nothing");
-    KayokoOCRAppendLog([NSString stringWithFormat:@"pass=%@ q=%.2f cjk=%lu chars=%lu ms=%.0f",
+    KayokoOCRAppendLog([NSString stringWithFormat:@"pass=%@ lvl=acc q=%.2f cjk=%lu chars=%lu ms=%.0f",
                                                   bestPass ?: @"nothing", bestQuality,
                                                   (unsigned long)KayokoCJKCount(bestText),
                                                   (unsigned long)bestText.length,
@@ -415,9 +473,10 @@ static void KayokoLogSupportedLanguages(void) {
 
 /// Runs one recognition pass and returns the raw observations.
 ///
-/// `accurate` (level 1) rather than `fast` (0): fast drops the thin UI glyphs
-/// these screenshots are full of, and the difference on a phone screenshot is a
-/// few hundred milliseconds.
+/// Level `accurate` (raw value 0), not `fast` (raw value 1). This is the whole
+/// bug that survived four releases: fast has no Chinese model, and asking it for
+/// one fails silently. Accurate costs a few hundred extra milliseconds on a phone
+/// screenshot, which is invisible next to the round trip through the panel.
 + (nullable NSArray *)observationsForImage:(CGImageRef)cgImage
                                 correction:(BOOL)correction
                                  languages:(NSArray<NSString *> *)languages
@@ -431,12 +490,24 @@ static void KayokoLogSupportedLanguages(void) {
     id handler = [(id)handlerClass alloc];
     handler = [handler initWithCGImage:cgImage options:@{}];
     id request = [[(id)requestClass alloc] init];
-    [request setRecognitionLevel:1];
+    [request setRecognitionLevel:kKayokoRecognitionLevelAccurate];
     if (revision > 0) {
         [request setRevision:revision];
     }
     [request setRecognitionLanguages:languages];
     [request setUsesLanguageCorrection:correction];
+
+    if ([languages containsObject:kKayokoRecognitionLanguageChinese]) {
+        static dispatch_once_t onceToken;
+        dispatch_once(&onceToken, ^{
+          if (KayokoAccurateLevelSupportsChinese()) {
+              return;
+          }
+          NSLog(@"Kayoko: Vision has no zh-Hans model at the accurate level — "
+                @"this pass can only return Latin");
+          KayokoOCRAppendLog(@"warning: zh-Hans missing from accurate level");
+        });
+    }
 
     NSError *error = nil;
     if (![handler performRequests:@[ request ] error:&error]) {
