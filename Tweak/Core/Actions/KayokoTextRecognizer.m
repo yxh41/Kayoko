@@ -93,6 +93,8 @@ static const double kKayokoAcceptedQuality = 0.72;
 - (void)setRecognitionLanguages:(NSArray<NSString *> *)languages;
 - (void)setUsesLanguageCorrection:(BOOL)usesLanguageCorrection;
 - (void)setRevision:(NSUInteger)revision;
+- (NSUInteger)revision;
+- (NSInteger)recognitionLevel;
 - (NSUInteger)currentRevision;
 - (NSArray<NSString *> *)supportedRecognitionLanguagesForTextRecognitionLevel:(NSInteger)level
                                                                     revision:(NSUInteger)revision
@@ -112,7 +114,9 @@ static const double kKayokoAcceptedQuality = 0.72;
 + (nullable NSArray *)observationsForImage:(CGImageRef)cgImage
                                 correction:(BOOL)correction
                                  languages:(NSArray<NSString *> *)languages
-                                  revision:(NSUInteger)revision;
+                                     level:(NSInteger)level
+                                 passIndex:(NSUInteger)passIndex
+                               diagnostics:(NSMutableString *)diagnostics;
 + (nullable NSArray<NSDictionary<NSString *, id> *> *)boxesFromObservations:(NSArray *)observations;
 + (nullable NSString *)assembleTextFromBoxes:(NSArray<NSDictionary<NSString *, id> *> *)boxes;
 + (void)appendRow:(NSArray<NSDictionary<NSString *, id> *> *)row to:(NSMutableString *)result;
@@ -242,6 +246,27 @@ static void KayokoOCRAppendLog(NSString *line) {
     [data writeToFile:path atomically:YES];
 }
 
+/// The revision the system considers current.
+///
+/// Set on every request explicitly, never left to the default. 4.3.19 relied on
+/// "0 means whatever the system defaults to" and every pass came back with zero
+/// observations — which is what a request pinned to revision 1 would look like on
+/// iOS 16, since revision 1 only ships the English model. Probing one revision and
+/// performing another is exactly the kind of mismatch that produces silence
+/// instead of an error, so the value is now read from the system, applied, and
+/// read back into the log.
+static NSUInteger KayokoCurrentRecognitionRevision(void) {
+    static dispatch_once_t onceToken;
+    static NSUInteger revision = 0;
+    dispatch_once(&onceToken, ^{
+      Class requestClass = NSClassFromString(@"VNRecognizeTextRequest");
+      if (requestClass && [(id)requestClass respondsToSelector:@selector(currentRevision)]) {
+          revision = [(id)requestClass currentRevision];
+      }
+    });
+    return revision;
+}
+
 /// Records what Vision claims to support, once per process.
 ///
 /// Both levels are written because the pair is the whole diagnosis: accurate
@@ -256,10 +281,7 @@ static void KayokoLogSupportedLanguages(void) {
       if (!requestClass) {
           return;
       }
-      NSUInteger revision = 0;
-      if ([(id)requestClass respondsToSelector:@selector(currentRevision)]) {
-          revision = [(id)requestClass currentRevision];
-      }
+      NSUInteger revision = KayokoCurrentRecognitionRevision();
       SEL probe = @selector(supportedRecognitionLanguagesForTextRecognitionLevel:revision:error:);
       if (![(id)requestClass respondsToSelector:probe]) {
           KayokoOCRAppendLog([NSString stringWithFormat:@"supported r%lu = (probe missing)",
@@ -301,10 +323,7 @@ static BOOL KayokoAccurateLevelSupportsChinese(void) {
       if (!requestClass || ![(id)requestClass respondsToSelector:probe]) {
           return;
       }
-      NSUInteger revision = 0;
-      if ([(id)requestClass respondsToSelector:@selector(currentRevision)]) {
-          revision = [(id)requestClass currentRevision];
-      }
+      NSUInteger revision = KayokoCurrentRecognitionRevision();
       NSArray *list =
           [(id)requestClass supportedRecognitionLanguagesForTextRecognitionLevel:kKayokoRecognitionLevelAccurate
                                                                        revision:revision
@@ -372,20 +391,38 @@ static BOOL KayokoAccurateLevelSupportsChinese(void) {
 /// the nearest Latin approximation. Forcing zh-Hans alone removes the choice:
 /// that model also reads Latin text, so mixed screenshots still come out whole.
 ///
-/// `revision` 0 means "leave the system default" (revision 3 on iOS 16).
-/// Revision 2 is the fallback rather than revision 1 because revision 1 is
-/// English-only — it can never return Chinese, so falling back to it would just
-/// burn a few hundred milliseconds and produce the exact Latin soup this whole
-/// exercise is about.
+/// No attempt carries a revision any more: every pass runs at the revision the
+/// system reports as current (see `KayokoCurrentRecognitionRevision`). The
+/// revision-2 fallback is gone as well — 4.3.19's silence came from probing one
+/// revision and performing another, so a second revision is the last thing worth
+/// trying, not the first.
+///
+/// The trailing fast pass is a probe, not a fallback. 4.3.19 handed accurate the
+/// same image, the same handler and the same languages and got zero observations
+/// on all five passes, while 4.3.18's fast request read hundreds of characters
+/// off the very same picture. Repeating that request at the fast level separates
+/// "the accurate engine refuses to run here" from "the image never reached
+/// Vision", which are two completely different bugs. Its result is logged and
+/// thrown away: Latin soup is exactly what this feature is being fixed to stop
+/// producing.
 + (NSArray<NSDictionary<NSString *, id> *> *)recognitionAttempts {
     return @[
-        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ], @"correction" : @YES, @"revision" : @0},
-        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ], @"correction" : @NO, @"revision" : @0},
+        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ],
+          @"correction" : @YES,
+          @"level" : @(kKayokoRecognitionLevelAccurate)},
+        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ],
+          @"correction" : @NO,
+          @"level" : @(kKayokoRecognitionLevelAccurate)},
         @{@"languages" : @[ kKayokoRecognitionLanguageChinese, kKayokoRecognitionLanguageEnglish ],
           @"correction" : @YES,
-          @"revision" : @0},
-        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ], @"correction" : @YES, @"revision" : @2},
-        @{@"languages" : @[ kKayokoRecognitionLanguageEnglish ], @"correction" : @YES, @"revision" : @0},
+          @"level" : @(kKayokoRecognitionLevelAccurate)},
+        @{@"languages" : @[ kKayokoRecognitionLanguageEnglish ],
+          @"correction" : @YES,
+          @"level" : @(kKayokoRecognitionLevelAccurate)},
+        @{@"languages" : @[ kKayokoRecognitionLanguageEnglish ],
+          @"correction" : @YES,
+          @"level" : @(kKayokoRecognitionLevelFast),
+          @"diagnosticOnly" : @YES},
     ];
 }
 
@@ -409,24 +446,44 @@ static BOOL KayokoAccurateLevelSupportsChinese(void) {
     BOOL bestHasCJK = NO;
     NSString *bestPass = nil;
 
+    NSUInteger passIndex = 0;
     for (NSDictionary<NSString *, id> *attempt in [self recognitionAttempts]) {
+        passIndex++;
         NSArray<NSString *> *languages = attempt[@"languages"];
         BOOL correction = [attempt[@"correction"] boolValue];
-        NSUInteger revision = [attempt[@"revision"] unsignedIntegerValue];
+        NSInteger level = attempt[@"level"]
+                              ? [attempt[@"level"] integerValue]
+                              : kKayokoRecognitionLevelAccurate;
+        BOOL diagnosticOnly = [attempt[@"diagnosticOnly"] boolValue];
+        NSMutableString *diagnostics = [NSMutableString string];
         NSArray *observations = [self observationsForImage:cgImage
                                                 correction:correction
                                                  languages:languages
-                                                  revision:revision];
+                                                     level:level
+                                                 passIndex:passIndex
+                                               diagnostics:diagnostics];
         NSArray<NSDictionary<NSString *, id> *> *boxes = [self boxesFromObservations:observations];
         NSString *text = [self assembleTextFromBoxes:boxes];
         double quality = KayokoQualityForBoxes(boxes);
         NSUInteger cjk = KayokoCJKCount(text);
-        NSString *label = [NSString stringWithFormat:@"%@%@%@",
+        NSString *label = [NSString stringWithFormat:@"%@%@",
                                                     [languages componentsJoinedByString:@"+"],
-                                                    correction ? @"" : @"-nc",
-                                                    revision > 0 ? [NSString stringWithFormat:@"-r%lu", (unsigned long)revision] : @""];
+                                                    correction ? @"" : @"-nc"];
         NSLog(@"Kayoko: OCR pass %@ quality=%.2f cjk=%lu chars=%lu", label, quality,
               (unsigned long)cjk, (unsigned long)text.length);
+        // One line per pass, written even when the pass produced nothing: an empty
+        // result is the interesting case, and until now it was the one case the
+        // log could not describe.
+        [diagnostics appendFormat:@" box=%lu text=%lu t=%.0fms%@",
+                                  (unsigned long)boxes.count,
+                                  (unsigned long)text.length,
+                                  [[NSDate date] timeIntervalSinceDate:startedAt] * 1000.0,
+                                  diagnosticOnly ? @" probe=discarded" : @""];
+        KayokoOCRAppendLog(diagnostics);
+
+        if (diagnosticOnly) {
+            continue;
+        }
 
         BOOL hasCJK = cjk > 0;
         BOOL better = NO;
@@ -477,25 +534,50 @@ static BOOL KayokoAccurateLevelSupportsChinese(void) {
 /// bug that survived four releases: fast has no Chinese model, and asking it for
 /// one fails silently. Accurate costs a few hundred extra milliseconds on a phone
 /// screenshot, which is invisible next to the round trip through the panel.
+///
+/// Everything the engine was actually configured with is formatted into
+/// `diagnostics` rather than assumed: 4.3.19 asked for revision 3 in the probe,
+/// performed revision 3 by accident-or-not, and returned zero observations on
+/// five consecutive passes with nothing in the log to say which of those was
+/// true. Reading the values back is the only way to tell "the request was built
+/// wrong" from "the engine refused".
 + (nullable NSArray *)observationsForImage:(CGImageRef)cgImage
                                 correction:(BOOL)correction
                                  languages:(NSArray<NSString *> *)languages
-                                  revision:(NSUInteger)revision {
+                                     level:(NSInteger)level
+                                 passIndex:(NSUInteger)passIndex
+                               diagnostics:(NSMutableString *)diagnostics {
     Class handlerClass = NSClassFromString(@"VNImageRequestHandler");
     Class requestClass = NSClassFromString(@"VNRecognizeTextRequest");
     if (!handlerClass || !requestClass) {
+        [diagnostics appendFormat:@"p%lu req=CLASS-MISSING",
+                                  (unsigned long)passIndex];
         return nil;
     }
 
     id handler = [(id)handlerClass alloc];
     handler = [handler initWithCGImage:cgImage options:@{}];
     id request = [[(id)requestClass alloc] init];
-    [request setRecognitionLevel:kKayokoRecognitionLevelAccurate];
+    [request setRecognitionLevel:level];
+    NSUInteger revision = KayokoCurrentRecognitionRevision();
     if (revision > 0) {
         [request setRevision:revision];
     }
     [request setRecognitionLanguages:languages];
     [request setUsesLanguageCorrection:correction];
+
+    NSUInteger appliedRevision = [(id)request respondsToSelector:@selector(revision)]
+                                     ? (NSUInteger)[request revision]
+                                     : 0;
+    NSInteger appliedLevel = [(id)request respondsToSelector:@selector(recognitionLevel)]
+                                 ? (NSInteger)[request recognitionLevel]
+                                 : -1;
+    [diagnostics appendFormat:@"p%lu %@ rev%lu lvl=%ld corr=%d",
+                              (unsigned long)passIndex,
+                              [languages componentsJoinedByString:@"+"],
+                              (unsigned long)appliedRevision,
+                              (long)appliedLevel,
+                              correction ? 1 : 0];
 
     if ([languages containsObject:kKayokoRecognitionLanguageChinese]) {
         static dispatch_once_t onceToken;
@@ -511,10 +593,16 @@ static BOOL KayokoAccurateLevelSupportsChinese(void) {
 
     NSError *error = nil;
     if (![handler performRequests:@[ request ] error:&error]) {
-        NSLog(@"Kayoko: OCR failed — %@", error.localizedDescription ?: @"unknown error");
+        NSString *reason = error.localizedDescription ?: @"unknown error";
+        // Newlines would split one pass across several log lines.
+        reason = [reason stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+        NSLog(@"Kayoko: OCR failed — %@", reason);
+        [diagnostics appendFormat:@" req=FAIL err=%@", reason];
         return nil;
     }
-    return [request results];
+    NSArray *results = [request results];
+    [diagnostics appendFormat:@" req=OK obs=%lu", (unsigned long)results.count];
+    return results;
 }
 
 /// Normalises the image before Vision sees it.
