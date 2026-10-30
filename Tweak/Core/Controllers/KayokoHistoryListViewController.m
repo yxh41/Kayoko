@@ -18,8 +18,6 @@
 #import "KayokoTableViewCellContent.h"
 #import "KayokoTableViewCellContentProvider.h"
 
-#import <dlfcn.h>
-
 /// Faircopy's panel URL scheme. Faircopy's WritingTools injector intercepts
 /// this scheme in-process and presents its panel with `keyword` as the text,
 /// so a Kayoko clip can be handed over without a pasteboard round-trip.
@@ -95,34 +93,36 @@ static const NSTimeInterval kKayokoFaircopyOCRSilentWait = 2.0;
 static NSString *const kKayokoFaircopyOCRDisplayTargetPath =
     @"/var/mobile/Library/Preferences/wiki.qaq.ai.gate/faircopy_ocr_target.txt";
 
+/// A bundle id worth handing to another process: ASCII, dotted, sane length.
+///
+/// 4.3.26: this is the belt to the KVC braces. Whatever a private API hands
+/// back has to look like a bundle id before it can become a panel target — the
+/// 4.3.25 crash was precisely a value that did not.
+static BOOL KayokoIsPlausibleBundleIdentifier(NSString *bundle) {
+    if (![bundle isKindOfClass:[NSString class]]) {
+        return NO;
+    }
+    if (bundle.length == 0 || bundle.length > 200) {
+        return NO;
+    }
+    NSCharacterSet *allowed = [NSCharacterSet
+        characterSetWithCharactersInString:
+            @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_"];
+    return [bundle rangeOfCharacterFromSet:allowed.invertedSet].location == NSNotFound;
+}
+
 /// The bundle id of the app currently in front, or nil when it cannot be read.
 ///
-/// Three sources, because the private entry points move between releases:
-/// the SpringBoardServices C function, then the workspace object (both KVC
-/// spellings in use), then the application controller.
+/// 4.3.26: KVC only. 4.3.25 also called
+/// `SBFrontmostApplicationDisplayIdentifier()` through dlsym, whose signature
+/// on iOS 16.4 is not `CFStringRef (void)`: it handed back an invalid pointer,
+/// `copy` was sent to it, and SpringBoard died with EXC_BAD_ACCESS at
+/// 0x10000003 (crash 07:48 on 2026-10-31, main thread, inside
+/// UIContextualAction's handler). Nothing about that call is worth the risk —
+/// the object graph below answers the same question, and when even that fails
+/// the panel is simply left to the injector's arbitration, which does not need
+/// to know the app's name at all.
 static NSString *KayokoFaircopyFrontmostBundleIdentifier(void) {
-    static CFStringRef (*frontmostDisplayIdentifier)(void) = NULL;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-      void *handle = dlopen(
-          "/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices",
-          RTLD_LAZY);
-      if (handle) {
-          frontmostDisplayIdentifier =
-              (CFStringRef (*)(void))dlsym(handle, "SBFrontmostApplicationDisplayIdentifier");
-      }
-    });
-    if (frontmostDisplayIdentifier) {
-        CFStringRef bundle = frontmostDisplayIdentifier();
-        if (bundle) {
-            NSString *value = [(__bridge NSString *)bundle copy];
-            CFRelease(bundle);
-            if (value.length > 0) {
-                return value;
-            }
-        }
-    }
-
     NSArray<NSString *> *classNames = @[ @"SBWorkspace", @"SBApplicationController" ];
     NSArray<NSString *> *keys = @[ @"frontmostApplication", @"_frontmostApplication" ];
     for (NSString *className in classNames) {
@@ -138,7 +138,7 @@ static NSString *KayokoFaircopyFrontmostBundleIdentifier(void) {
             @try {
                 id application = [shared valueForKey:key];
                 NSString *bundle = [application valueForKey:@"bundleIdentifier"];
-                if ([bundle isKindOfClass:[NSString class]] && bundle.length > 0) {
+                if (KayokoIsPlausibleBundleIdentifier(bundle)) {
                     return bundle;
                 }
             } @catch (__unused NSException *exception) {
@@ -149,18 +149,24 @@ static NSString *KayokoFaircopyFrontmostBundleIdentifier(void) {
     return nil;
 }
 
-/// Leaves the answer where AIGate can read it. SpringBoard is the honest
-/// fallback: with no app in front, that is exactly where the user is.
-static NSString *KayokoWriteFaircopyOCRDisplayTarget(void) {
+/// Leaves the answer where AIGate can read it.
+///
+/// 4.3.26: no answer means NO file, not "SpringBoard". An empty file is read by
+/// AIGate as "let the injector arbitrate", which is the road a plain broadcast
+/// has always taken — the app the user is looking at claims the panel first and
+/// SpringBoard defers 0.8 s. Writing SpringBoard here would pin the panel to
+/// the home screen, i.e. exactly the behaviour this is meant to remove.
+static void KayokoWriteFaircopyOCRDisplayTarget(void) {
     NSString *bundle = KayokoFaircopyFrontmostBundleIdentifier();
-    if (bundle.length == 0) {
-        bundle = @"com.apple.springboard";
+    if (!KayokoIsPlausibleBundleIdentifier(bundle)) {
+        [[NSFileManager defaultManager] removeItemAtPath:kKayokoFaircopyOCRDisplayTargetPath
+                                                   error:nil];
+        return;
     }
     [bundle writeToFile:kKayokoFaircopyOCRDisplayTargetPath
              atomically:YES
                encoding:NSUTF8StringEncoding
                   error:nil];
-    return bundle;
 }
 
 /// A hand-off that dies mid-flight (AIGate killed by jetsam, bounce lost) must
