@@ -41,14 +41,6 @@ static const CGFloat kKayokoRecognitionMaxPixelSize = 4096.0;
 static const CGFloat kKayokoRecognitionMinPixelSize = 1000.0;
 static const CGFloat kKayokoRecognitionMaxUpscale = 3.0;
 
-/// Recognition languages, in priority order. Chinese first because the pictures
-/// people clip here are overwhelmingly Chinese UI; English is kept as the
-/// fallback so mixed lines ("已复制 3 items") still come out whole.
-///
-/// Traditional Chinese is deliberately not listed: Vision emits characters in
-/// the script of whichever language it picks, so adding zh-Hant to the list
-/// risks converting a Simplified screenshot into Traditional output — a whole
-/// different way of being wrong.
 static NSString *const kKayokoRecognitionLanguageChinese = @"zh-Hans";
 static NSString *const kKayokoRecognitionLanguageEnglish = @"en-US";
 
@@ -57,11 +49,8 @@ static NSString *const kKayokoRecognitionLanguageEnglish = @"en-US";
 /// the user a stray character to delete.
 static const float kKayokoMinimumConfidence = 0.25f;
 
-/// Mean confidence under which a second, correction-free pass is worth running.
-/// Screenshot text is not prose — codes, prices, names, mixed scripts — and the
-/// language-correction model rewrites what it reads into something more
-/// plausible, which is the classic "recognised but wrong" result.
-static const double kKayokoCorrectionFallbackQuality = 0.62;
+/// Quality at which a pass that actually produced Chinese counts as settled.
+static const double kKayokoAcceptedQuality = 0.72;
 
 /// Compile-time selector declarations for the Vision classes.
 ///
@@ -77,6 +66,7 @@ static const double kKayokoCorrectionFallbackQuality = 0.62;
 - (void)setRecognitionLevel:(NSInteger)level;
 - (void)setRecognitionLanguages:(NSArray<NSString *> *)languages;
 - (void)setUsesLanguageCorrection:(BOOL)usesLanguageCorrection;
+- (void)setRevision:(NSUInteger)revision;
 - (BOOL)performRequests:(NSArray *)requests error:(NSError **)error;
 - (NSArray *)results;
 - (NSArray *)topCandidates:(NSUInteger)limit;
@@ -85,14 +75,14 @@ static const double kKayokoCorrectionFallbackQuality = 0.62;
 - (NSString *)string;
 @end
 
-/// Private helpers, declared up front so the blocks below do not have to call a
-/// method that is textually defined further down.
 @interface KayokoTextRecognizer ()
 + (nullable NSString *)recognizeSynchronouslyAtPath:(NSString *)path;
 + (nullable UIImage *)preparedImage:(UIImage *)image;
++ (NSArray<NSDictionary<NSString *, id> *> *)recognitionAttempts;
 + (nullable NSArray *)observationsForImage:(CGImageRef)cgImage
                                 correction:(BOOL)correction
-                                  language:(NSArray<NSString *> *)languages;
+                                 languages:(NSArray<NSString *> *)languages
+                                  revision:(NSUInteger)revision;
 + (nullable NSArray<NSDictionary<NSString *, id> *> *)boxesFromObservations:(NSArray *)observations;
 + (nullable NSString *)assembleTextFromBoxes:(NSArray<NSDictionary<NSString *, id> *> *)boxes;
 + (void)appendRow:(NSArray<NSDictionary<NSString *, id> *> *)row to:(NSMutableString *)result;
@@ -100,9 +90,64 @@ static const double kKayokoCorrectionFallbackQuality = 0.62;
                   andNext:(NSString *)next
                       gap:(CGFloat)gap
                 rowHeight:(CGFloat)rowHeight;
-+ (BOOL)isCJK:(unichar)character;
-+ (BOOL)isPunctuation:(unichar)character;
 @end
+
+#pragma mark - Character classes
+
+static BOOL KayokoCharIsCJK(unichar character) {
+    if (character >= 0x3000 && character <= 0x303F) {
+        return YES; // CJK punctuation
+    }
+    if (character >= 0x3040 && character <= 0x30FF) {
+        return YES; // kana
+    }
+    if (character >= 0x3400 && character <= 0x4DBF) {
+        return YES;
+    }
+    if (character >= 0x4E00 && character <= 0x9FFF) {
+        return YES;
+    }
+    if (character >= 0xF900 && character <= 0xFAFF) {
+        return YES;
+    }
+    if (character >= 0xFF00 && character <= 0xFFEF) {
+        return YES; // fullwidth forms
+    }
+    return NO;
+}
+
+static BOOL KayokoCharIsPunctuation(unichar character) {
+    if (character < 0x80) {
+        return ispunct((int)character) != 0 && character != '#' && character != '@';
+    }
+    return NO;
+}
+
+/// How many CJK characters a result carries.
+///
+/// This is the signal that separates the two failure modes: an English-only
+/// model reads Chinese glyphs as Latin approximations ("凡人修仙传" came back as
+/// "nAlI°ILtIl*"), which produces a long string with almost no CJK in it. A pass
+/// that returned CJK at all went through the Chinese model.
+static NSUInteger KayokoCJKCount(NSString *text) {
+    NSUInteger length = text.length;
+    if (length == 0) {
+        return 0;
+    }
+    NSUInteger count = 0;
+    unichar *buffer = malloc(sizeof(unichar) * length);
+    if (!buffer) {
+        return 0;
+    }
+    [text getCharacters:buffer range:NSMakeRange(0, length)];
+    for (NSUInteger index = 0; index < length; index++) {
+        if (KayokoCharIsCJK(buffer[index])) {
+            count++;
+        }
+    }
+    free(buffer);
+    return count;
+}
 
 /// Mean recognition confidence, weighted by how much text each box carries.
 /// 0 when nothing usable came back.
@@ -183,6 +228,31 @@ static CGFloat KayokoOverlapRatio(CGRect lhs, CGRect rhs) {
 
 #pragma mark - Recognition
 
+/// Tried in order, stopping as soon as a pass is good enough.
+///
+/// The single-language passes are not redundant with the two-language one. When
+/// a request lists more than one language, Vision picks one for the whole image
+/// based on the dominant script — on a chat screenshot full of timestamps, app
+/// names and English UI it picked English, and then read every Chinese glyph as
+/// the nearest Latin approximation. Forcing zh-Hans alone removes the choice:
+/// that model also reads Latin text, so mixed screenshots still come out whole.
+///
+/// `revision` is only set where noted; 0 means "leave whatever the system
+/// defaults to". Revision 1 ships the original iOS 13 model, which is weaker but
+/// is the one that definitely carries Chinese — kept as the last resort in case
+/// the current revision's model cannot be loaded in a non-app process.
++ (NSArray<NSDictionary<NSString *, id> *> *)recognitionAttempts {
+    return @[
+        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ], @"correction" : @YES, @"revision" : @0},
+        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ], @"correction" : @NO, @"revision" : @0},
+        @{@"languages" : @[ kKayokoRecognitionLanguageChinese, kKayokoRecognitionLanguageEnglish ],
+          @"correction" : @YES,
+          @"revision" : @0},
+        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ], @"correction" : @YES, @"revision" : @1},
+        @{@"languages" : @[ kKayokoRecognitionLanguageEnglish ], @"correction" : @YES, @"revision" : @0},
+    ];
+}
+
 + (nullable NSString *)recognizeSynchronouslyAtPath:(NSString *)path {
     UIImage *image = [UIImage imageWithContentsOfFile:path];
     if (!image) {
@@ -197,38 +267,66 @@ static CGFloat KayokoOverlapRatio(CGRect lhs, CGRect rhs) {
     }
 
     NSDate *startedAt = [NSDate date];
-    NSArray *languages = @[ kKayokoRecognitionLanguageChinese, kKayokoRecognitionLanguageEnglish ];
+    NSString *bestText = nil;
+    double bestQuality = -1.0;
+    BOOL bestHasCJK = NO;
+    NSString *bestPass = nil;
 
-    NSArray *observations = [self observationsForImage:cgImage correction:YES language:languages];
-    NSArray<NSDictionary<NSString *, id> *> *boxes = [self boxesFromObservations:observations];
-    double quality = KayokoQualityForBoxes(boxes);
-    NSString *pass = @"corrected";
+    for (NSDictionary<NSString *, id> *attempt in [self recognitionAttempts]) {
+        NSArray<NSString *> *languages = attempt[@"languages"];
+        BOOL correction = [attempt[@"correction"] boolValue];
+        NSUInteger revision = [attempt[@"revision"] unsignedIntegerValue];
+        NSArray *observations = [self observationsForImage:cgImage
+                                                correction:correction
+                                                 languages:languages
+                                                  revision:revision];
+        NSArray<NSDictionary<NSString *, id> *> *boxes = [self boxesFromObservations:observations];
+        NSString *text = [self assembleTextFromBoxes:boxes];
+        double quality = KayokoQualityForBoxes(boxes);
+        NSUInteger cjk = KayokoCJKCount(text);
+        NSString *label = [NSString stringWithFormat:@"%@%@%@",
+                                                    [languages componentsJoinedByString:@"+"],
+                                                    correction ? @"" : @"-nc",
+                                                    revision > 0 ? [NSString stringWithFormat:@"-r%lu", (unsigned long)revision] : @""];
+        NSLog(@"Kayoko: OCR pass %@ quality=%.2f cjk=%lu chars=%lu", label, quality,
+              (unsigned long)cjk, (unsigned long)text.length);
 
-    if (quality < kKayokoCorrectionFallbackQuality) {
-        // Language correction is a language model, and on screenshot text it
-        // likes to rewrite what it half-read into a more common phrase. A
-        // correction-free pass often leaves the glyphs alone and scores higher.
-        NSArray *plain = [self observationsForImage:cgImage correction:NO language:languages];
-        NSArray<NSDictionary<NSString *, id> *> *plainBoxes = [self boxesFromObservations:plain];
-        double plainQuality = KayokoQualityForBoxes(plainBoxes);
-        NSLog(@"Kayoko: OCR fell back to the correction-free pass (quality %.2f -> %.2f)",
-              quality, plainQuality);
-        if (plainQuality > quality) {
-            boxes = plainBoxes;
-            quality = plainQuality;
-            pass = @"plain";
+        BOOL hasCJK = cjk > 0;
+        BOOL better = NO;
+        if (text.length > 0) {
+            if (bestText == nil) {
+                better = YES;
+            } else if (hasCJK != bestHasCJK) {
+                // Any CJK at all beats a longer Latin-only reading: it means the
+                // Chinese model handled the image instead of the English one
+                // guessing at every glyph.
+                better = hasCJK;
+            } else {
+                better = quality > bestQuality + 0.02;
+            }
+        }
+        if (better) {
+            bestText = text;
+            bestQuality = quality;
+            bestHasCJK = hasCJK;
+            bestPass = label;
+        }
+
+        if (bestHasCJK && bestQuality >= kKayokoAcceptedQuality) {
+            break;
+        }
+        // A very confident Latin-only reading is a genuinely Latin picture; no
+        // further pass will improve on it.
+        if (!bestHasCJK && bestQuality >= 0.90 && bestText.length > 0) {
+            break;
         }
     }
 
-    NSString *text = [self assembleTextFromBoxes:boxes];
-    NSLog(@"Kayoko: OCR %@ in %.0f ms, %lu chars, %lu boxes, quality %.2f (%@)",
-          text.length > 0 ? @"ok" : @"empty",
+    NSLog(@"Kayoko: OCR %@ in %.0f ms, %lu chars, quality %.2f, from %@",
+          bestText.length > 0 ? @"ok" : @"empty",
           [[NSDate date] timeIntervalSinceDate:startedAt] * 1000.0,
-          (unsigned long)text.length,
-          (unsigned long)boxes.count,
-          quality,
-          pass);
-    return text;
+          (unsigned long)bestText.length, bestQuality, bestPass ?: @"nothing");
+    return bestText;
 }
 
 /// Runs one recognition pass and returns the raw observations.
@@ -238,7 +336,8 @@ static CGFloat KayokoOverlapRatio(CGRect lhs, CGRect rhs) {
 /// few hundred milliseconds.
 + (nullable NSArray *)observationsForImage:(CGImageRef)cgImage
                                 correction:(BOOL)correction
-                                  language:(NSArray<NSString *> *)languages {
+                                 languages:(NSArray<NSString *> *)languages
+                                  revision:(NSUInteger)revision {
     Class handlerClass = NSClassFromString(@"VNImageRequestHandler");
     Class requestClass = NSClassFromString(@"VNRecognizeTextRequest");
     if (!handlerClass || !requestClass) {
@@ -249,6 +348,9 @@ static CGFloat KayokoOverlapRatio(CGRect lhs, CGRect rhs) {
     handler = [handler initWithCGImage:cgImage options:@{}];
     id request = [[(id)requestClass alloc] init];
     [request setRecognitionLevel:1];
+    if (revision > 0) {
+        [request setRevision:revision];
+    }
     [request setRecognitionLanguages:languages];
     [request setUsesLanguageCorrection:correction];
 
@@ -498,44 +600,15 @@ static CGFloat KayokoOverlapRatio(CGRect lhs, CGRect rhs) {
     // Chinese and Japanese have no inter-word gaps, so a space here would be a
     // lie — 分词 would then treat the two halves as separate words. Only a gap
     // wide enough to be a column break counts.
-    if ([self isCJK:left] || [self isCJK:right]) {
+    if (KayokoCharIsCJK(left) || KayokoCharIsCJK(right)) {
         return gap > unit * 0.5;
     }
     // Latin fragments: Vision usually ate the gap. Restore it unless the next
     // fragment starts with something that never follows a space.
-    if ([self isPunctuation:right]) {
+    if (KayokoCharIsPunctuation(right)) {
         return NO;
     }
     return gap > unit * 0.08;
-}
-
-+ (BOOL)isCJK:(unichar)character {
-    if (character >= 0x3000 && character <= 0x303F) {
-        return YES; // CJK punctuation
-    }
-    if (character >= 0x3040 && character <= 0x30FF) {
-        return YES; // kana
-    }
-    if (character >= 0x3400 && character <= 0x4DBF) {
-        return YES;
-    }
-    if (character >= 0x4E00 && character <= 0x9FFF) {
-        return YES;
-    }
-    if (character >= 0xF900 && character <= 0xFAFF) {
-        return YES;
-    }
-    if (character >= 0xFF00 && character <= 0xFFEF) {
-        return YES; // fullwidth forms
-    }
-    return NO;
-}
-
-+ (BOOL)isPunctuation:(unichar)character {
-    if (character < 0x80) {
-        return ispunct((int)character) != 0 && character != '#' && character != '@';
-    }
-    return NO;
 }
 
 @end
