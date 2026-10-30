@@ -5,6 +5,16 @@
 //  Recognises the text inside a clipboard picture, so the swipe action can hand
 //  real text to Faircopy's 分词 instead of an image it cannot read.
 //
+//  4.3.22: NOT CALLED ANY MORE. Vision's accurate text network does not run in
+//  SpringBoard — every `.accurate` pass fails with `Error computing NN outputs`
+//  on the same handler and the same picture that a `.fast` pass reads fine — so
+//  the recognition moved into AIGate's own process (`faircopy://ocr`, see
+//  KayokoHistoryListViewController's picture hand-off). This class stays in the
+//  build for two reasons: its pass-by-pass probe is the only written record of
+//  how that was narrowed down (supported-language tables, per-pass error text,
+//  image variants, revisions), and it is the thing to re-enable if a future iOS
+//  lets the accurate engine run here.
+//
 
 #import <Foundation/Foundation.h>
 

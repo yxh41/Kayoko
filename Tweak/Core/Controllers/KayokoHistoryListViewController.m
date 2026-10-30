@@ -17,7 +17,6 @@
 #import "KayokoTableViewCell.h"
 #import "KayokoTableViewCellContent.h"
 #import "KayokoTableViewCellContentProvider.h"
-#import "KayokoTextRecognizer.h"
 
 /// Faircopy's panel URL scheme. Faircopy's WritingTools injector intercepts
 /// this scheme in-process and presents its panel with `keyword` as the text,
@@ -32,15 +31,34 @@ static NSString *const kKayokoFaircopyPresentNotification = @"wiki.qaq.faircopy.
 /// Past this length a URL stops being a sane transport; switch to the pasteboard.
 static const NSUInteger kKayokoFaircopyKeywordLengthLimit = 1000;
 
-/// Same idea, but for the OCR text read out of a picture. Higher on purpose:
-/// this path is intercepted in-process by Faircopy's injector (no
-/// LaunchServices hop), so a long screenshot's worth of text still fits, and
-/// the pasteboard fallback would drop the `mode=segment` request below.
-static const NSUInteger kKayokoFaircopyImageKeywordLengthLimit = 4000;
+/// 4.3.22: pictures take a different road — see
+/// `sendImageToFaircopyForSegmentation:` below. AIGate registers the same
+/// `faircopy` scheme, so this host is simply "recognise this and bounce back";
+/// Faircopy's injector only intercepts the `panel` host, which is what lets the
+/// request leave SpringBoard at all.
+static NSString *const kKayokoFaircopyOCRURLString = @"faircopy://ocr";
 
-/// Ask Faircopy to open the panel already tokenized
-/// (`faircopy://panel?keyword=…&mode=segment`).
-static NSString *const kKayokoFaircopySegmentMode = @"segment";
+/// Drop box for the picture and its answer. Same shared directory Faircopy's
+/// panel hand-off and app-search stores already use, and the one place both
+/// processes can reach: a clipboard screenshot is far too large for a URL, and
+/// SpringBoard and the AIGate app share no container.
+/// KEEP IN SYNC with FaircopyImageOCR in AIGate/AIGate/Editor/FaircopyApp.swift.
+static NSString *const kKayokoFaircopyOCRDirectory =
+    @"/var/mobile/Library/Preferences/wiki.qaq.ai.gate";
+static NSString *const kKayokoFaircopyOCRInputPath =
+    @"/var/mobile/Library/Preferences/wiki.qaq.ai.gate/faircopy_ocr_input.img";
+static NSString *const kKayokoFaircopyOCRResultPath =
+    @"/var/mobile/Library/Preferences/wiki.qaq.ai.gate/faircopy_ocr_result.json";
+/// Posted by AIGate once the recognition finished, whatever the outcome.
+static NSString *const kKayokoFaircopyOCRResultNotification = @"wiki.qaq.faircopy.ocr.result";
+
+/// A hand-off that dies mid-flight (AIGate killed by jetsam, bounce lost) must
+/// not leave the pill spinning on the home screen forever.
+static const NSTimeInterval kKayokoFaircopyOCRTimeout = 12.0;
+
+/// One hand-off at a time: a late result from a previous picture must not take
+/// down the pill of the current one, or claim its words.
+static BOOL gKayokoFaircopyOCRHandoffPending = NO;
 
 /// Hands text to Faircopy: URL when it fits, pasteboard + notification otherwise.
 ///
@@ -71,6 +89,91 @@ static void KayokoSendTextToFaircopy(NSString *content, NSString *mode, NSUInteg
                                          NULL,
                                          NULL,
                                          YES);
+}
+
+#pragma mark - Picture hand-off (4.3.22)
+
+/// Vision's accurate text network cannot run inside SpringBoard.
+///
+/// 4.3.15-4.3.21 tried everything in-process: the recognition level (Accurate is
+/// raw value 0, Fast is 1), the revision, the language list, the image variant.
+/// The 4.3.20 probe settled it — every `.accurate` pass on the very same handler
+/// and the very same picture fails with `Error computing NN outputs`, while a
+/// `.fast` pass on that same handler in the same run returns observations. Fast,
+/// however, ships no Chinese model at all, which is why it read `凡人修仙传` as
+/// `nAlI°ILtIl*`. The network needs a process it will run in, so the recognition
+/// happens in AIGate — a real app, where Live Text does the same work — and the
+/// answer comes back through the shared directory.
+///
+/// The picture travels by file: a clipboard screenshot is far too large for a
+/// URL, and SpringBoard and the app share no container.
+
+/// Copies the picture into the drop box and clears the previous answer.
+static BOOL KayokoPrepareFaircopyOCRHandoff(NSString *imagePath) {
+    NSData *data = [NSData dataWithContentsOfFile:imagePath];
+    if (data.length == 0) {
+        return NO;
+    }
+    NSFileManager *manager = [NSFileManager defaultManager];
+    [manager createDirectoryAtPath:kKayokoFaircopyOCRDirectory
+       withIntermediateDirectories:YES
+                        attributes:nil
+                             error:nil];
+    // A stale answer must never be mistaken for this picture's.
+    [manager removeItemAtPath:kKayokoFaircopyOCRResultPath error:nil];
+    return [data writeToFile:kKayokoFaircopyOCRInputPath options:NSDataWritingAtomic error:nil];
+}
+
+/// Reads AIGate's answer and settles the pill. `ok` means the panel is on its
+/// way; anything else means the picture had no text (or the hand-off failed), and
+/// staying silent there would look exactly like a dead button.
+static void KayokoSettleFaircopyOCRHandoff(void) {
+    if (!gKayokoFaircopyOCRHandoffPending) {
+        return;
+    }
+    gKayokoFaircopyOCRHandoffPending = NO;
+
+    NSData *data = [NSData dataWithContentsOfFile:kKayokoFaircopyOCRResultPath];
+    NSDictionary *result = data
+        ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
+    if (![result isKindOfClass:[NSDictionary class]]) {
+        [KayokoHUD hide];
+        return;
+    }
+    if ([result[@"ok"] boolValue]) {
+        [KayokoHUD hide];
+        return;
+    }
+    NSInteger chars = [result[@"chars"] integerValue];
+    if (chars > 0) {
+        // Recognised, but the panel invocation never landed. Nothing useful to
+        // say beyond "that did not work"; the pill must still go away.
+        [KayokoHUD hide];
+        return;
+    }
+    [KayokoHUD showTransientStatus:@"No text in this image"];
+    UINotificationFeedbackGenerator *generator = [[UINotificationFeedbackGenerator alloc] init];
+    [generator notificationOccurred:UINotificationFeedbackTypeWarning];
+}
+
+static void KayokoFaircopyOCRResultCallback(__unused CFNotificationCenterRef center,
+                                            __unused void *observer,
+                                            __unused CFStringRef name,
+                                            __unused const void *object,
+                                            __unused CFDictionaryRef userInfo) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+      KayokoSettleFaircopyOCRHandoff();
+    });
+}
+
+static void KayokoObserveFaircopyOCRResult(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+      CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+                                      KayokoFaircopyOCRResultCallback,
+                                      (__bridge CFStringRef)kKayokoFaircopyOCRResultNotification,
+                                      NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+    });
 }
 
 NS_ASSUME_NONNULL_BEGIN
@@ -1093,33 +1196,55 @@ NS_ASSUME_NONNULL_END
     return faircopyAction;
 }
 
-/// OCRs a clipboard picture and hands the text to Faircopy's 分词.
+/// Hands a clipboard picture to AIGate, which recognises its text and comes back
+/// with a `mode=segment` panel invocation.
 ///
-/// Runs entirely in SpringBoard: the recogniser is loaded on first use, the
-/// request runs off the main thread, and the panel is only summoned when there
-/// is something to tokenize. A picture with no text gets a short pill and no
-/// panel — opening Faircopy on nothing looks like the button failed.
+/// Nothing here does recognition: see the note above
+/// `KayokoPrepareFaircopyOCRHandoff` for why the network cannot run in this
+/// process. What this side owns is the pill — it goes up before the hand-off,
+/// and AIGate's answer takes it down, both when the panel is on its way and when
+/// the picture simply had no text.
 - (void)sendImageToFaircopyForSegmentation:(NSString *)imagePath {
     [KayokoHUD showStatus:@"Reading text…"];
-    // No `self` in this block on purpose: the list controller can be gone by the
-    // time recognition finishes (the row's action dismisses the panel first), and
-    // a weak-self bail-out there would leave the pill on screen forever. Nothing
-    // in the completion needs the controller.
-    [KayokoTextRecognizer recognizeTextInImageAtPath:imagePath
-                                          completion:^(NSString *_Nullable text) {
-                                            if ([text length] == 0) {
-                                                [KayokoHUD showTransientStatus:@"No text in this image"];
-                                                UINotificationFeedbackGenerator *generator =
-                                                    [[UINotificationFeedbackGenerator alloc] init];
-                                                [generator notificationOccurred:
-                                                               UINotificationFeedbackTypeWarning];
-                                                return;
-                                            }
-                                            [KayokoHUD hide];
-                                            KayokoSendTextToFaircopy(text,
-                                                                     kKayokoFaircopySegmentMode,
-                                                                     kKayokoFaircopyImageKeywordLengthLimit);
-                                          }];
+    if (!KayokoPrepareFaircopyOCRHandoff(imagePath)) {
+        [KayokoHUD showTransientStatus:@"Cannot read this image"];
+        return;
+    }
+    KayokoObserveFaircopyOCRResult();
+    gKayokoFaircopyOCRHandoffPending = YES;
+
+    NSURL *URL = [NSURL URLWithString:kKayokoFaircopyOCRURLString];
+    // No `self` in either block on purpose: the list controller is gone by the
+    // time any of this runs (the row's action dismisses the panel first), and a
+    // weak-self bail-out would leave the pill on screen forever. Nothing here
+    // needs the controller.
+    [[UIApplication sharedApplication] openURL:URL
+                                       options:@{}
+                             completionHandler:^(BOOL success) {
+                               if (success) {
+                                   return;
+                               }
+                               dispatch_async(dispatch_get_main_queue(), ^{
+                                 if (!gKayokoFaircopyOCRHandoffPending) {
+                                     return;
+                                 }
+                                 gKayokoFaircopyOCRHandoffPending = NO;
+                                 [KayokoHUD showTransientStatus:@"Faircopy is not installed"];
+                                 UINotificationFeedbackGenerator *generator =
+                                     [[UINotificationFeedbackGenerator alloc] init];
+                                 [generator notificationOccurred:UINotificationFeedbackTypeError];
+                               });
+                             }];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(kKayokoFaircopyOCRTimeout * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+                     if (!gKayokoFaircopyOCRHandoffPending) {
+                         return;
+                     }
+                     gKayokoFaircopyOCRHandoffPending = NO;
+                     [KayokoHUD hide];
+                   });
 }
 
 /// The floating-image action, on the left swipe next to delete.
