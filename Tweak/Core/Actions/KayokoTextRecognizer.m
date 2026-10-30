@@ -13,6 +13,16 @@
 #import <UIKit/UIKit.h>
 #import <ctype.h>
 #import <dlfcn.h>
+#import <roothide.h>
+
+/// One line per recognition, rolled at 8 KB.
+///
+/// OCR quality is not something the user can describe ("认出来的字不对") and not
+/// something that can be reproduced off-device, so the pass that won, its mean
+/// confidence and how much CJK it produced are recorded. If Vision refuses the
+/// Chinese model in SpringBoard, this file is the only place that shows it.
+static NSString *const kKayokoOCRLogPath = @"/var/mobile/Library/com.82flex.kayoko/ocr.log";
+static const unsigned long long kKayokoOCRLogLimit = 8192;
 
 /// Vision is opened on demand, never linked.
 ///
@@ -67,6 +77,10 @@ static const double kKayokoAcceptedQuality = 0.72;
 - (void)setRecognitionLanguages:(NSArray<NSString *> *)languages;
 - (void)setUsesLanguageCorrection:(BOOL)usesLanguageCorrection;
 - (void)setRevision:(NSUInteger)revision;
+- (NSUInteger)currentRevision;
+- (NSArray<NSString *> *)supportedRecognitionLanguagesForTextRecognitionLevel:(NSInteger)level
+                                                                    revision:(NSUInteger)revision
+                                                                       error:(NSError **)error;
 - (BOOL)performRequests:(NSArray *)requests error:(NSError **)error;
 - (NSArray *)results;
 - (NSArray *)topCandidates:(NSUInteger)limit;
@@ -180,6 +194,70 @@ static CGFloat KayokoOverlapRatio(CGRect lhs, CGRect rhs) {
     return smaller > 0.0 ? area / smaller : 0.0;
 }
 
+static void KayokoOCRAppendLog(NSString *line) {
+    static NSDateFormatter *formatter = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+      formatter = [[NSDateFormatter alloc] init];
+      [formatter setDateFormat:@"HH:mm:ss"];
+    });
+    if (line.length == 0) {
+        return;
+    }
+
+    NSString *path = jbroot(kKayokoOCRLogPath);
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    NSString *directory = [path stringByDeletingLastPathComponent];
+    if (![fileManager fileExistsAtPath:directory]) {
+        [fileManager createDirectoryAtPath:directory
+               withIntermediateDirectories:YES
+                                attributes:nil
+                                     error:nil];
+    }
+    NSData *existing = [fileManager contentsAtPath:path];
+    if (existing.length > kKayokoOCRLogLimit) {
+        [fileManager removeItemAtPath:path error:nil];
+        existing = nil;
+    }
+    NSString *entry = [NSString stringWithFormat:@"%@ %@\n",
+                                                 [formatter stringFromDate:[NSDate date]], line];
+    NSMutableData *data = [NSMutableData dataWithData:existing ?: [NSData data]];
+    [data appendData:[entry dataUsingEncoding:NSUTF8StringEncoding]];
+    [data writeToFile:path atomically:YES];
+}
+
+/// Records what Vision claims to support, once per process.
+///
+/// If this line lists zh-Hans, the model is there and the problem is elsewhere.
+/// If it does not, no amount of tuning in this file will ever produce Chinese —
+/// the only options left are doing the OCR in another process or dropping the
+/// feature.
+static void KayokoLogSupportedLanguages(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+      Class requestClass = NSClassFromString(@"VNRecognizeTextRequest");
+      if (!requestClass) {
+          return;
+      }
+      NSUInteger revision = 0;
+      if ([(id)requestClass respondsToSelector:@selector(currentRevision)]) {
+          revision = [(id)requestClass currentRevision];
+      }
+      NSArray *supported = nil;
+      NSError *error = nil;
+      if ([(id)requestClass respondsToSelector:
+                                 @selector(supportedRecognitionLanguagesForTextRecognitionLevel:revision:error:)]) {
+          supported = [(id)requestClass supportedRecognitionLanguagesForTextRecognitionLevel:1
+                                                                                   revision:revision
+                                                                                      error:&error];
+      }
+      KayokoOCRAppendLog([NSString stringWithFormat:@"supported r%lu = %@",
+                                                    (unsigned long)revision,
+                                                    [supported componentsJoinedByString:@","]
+                                                        ?: @"(query failed)"]);
+    });
+}
+
 @implementation KayokoTextRecognizer
 + (BOOL)isAvailable {
     static dispatch_once_t onceToken;
@@ -267,6 +345,7 @@ static CGFloat KayokoOverlapRatio(CGRect lhs, CGRect rhs) {
     }
 
     NSDate *startedAt = [NSDate date];
+    KayokoLogSupportedLanguages();
     NSString *bestText = nil;
     double bestQuality = -1.0;
     BOOL bestHasCJK = NO;
@@ -326,6 +405,11 @@ static CGFloat KayokoOverlapRatio(CGRect lhs, CGRect rhs) {
           bestText.length > 0 ? @"ok" : @"empty",
           [[NSDate date] timeIntervalSinceDate:startedAt] * 1000.0,
           (unsigned long)bestText.length, bestQuality, bestPass ?: @"nothing");
+    KayokoOCRAppendLog([NSString stringWithFormat:@"pass=%@ q=%.2f cjk=%lu chars=%lu ms=%.0f",
+                                                  bestPass ?: @"nothing", bestQuality,
+                                                  (unsigned long)KayokoCJKCount(bestText),
+                                                  (unsigned long)bestText.length,
+                                                  [[NSDate date] timeIntervalSinceDate:startedAt] * 1000.0]);
     return bestText;
 }
 
