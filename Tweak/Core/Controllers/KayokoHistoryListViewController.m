@@ -6,6 +6,7 @@
 #import "KayokoHistoryListViewController.h"
 #import "KayokoFavoritesTableView.h"
 #import "KayokoFloatActionHandler.h"
+#import "KayokoHUD.h"
 #import "KayokoHistoryItemActionHandler.h"
 #import "KayokoHistoryListView.h"
 #import "KayokoHistoryTableView.h"
@@ -16,6 +17,7 @@
 #import "KayokoTableViewCell.h"
 #import "KayokoTableViewCellContent.h"
 #import "KayokoTableViewCellContentProvider.h"
+#import "KayokoTextRecognizer.h"
 
 /// Faircopy's panel URL scheme. Faircopy's WritingTools injector intercepts
 /// this scheme in-process and presents its panel with `keyword` as the text,
@@ -29,6 +31,47 @@ static NSString *const kKayokoFaircopyPresentNotification = @"wiki.qaq.faircopy.
 
 /// Past this length a URL stops being a sane transport; switch to the pasteboard.
 static const NSUInteger kKayokoFaircopyKeywordLengthLimit = 1000;
+
+/// Same idea, but for the OCR text read out of a picture. Higher on purpose:
+/// this path is intercepted in-process by Faircopy's injector (no
+/// LaunchServices hop), so a long screenshot's worth of text still fits, and
+/// the pasteboard fallback would drop the `mode=segment` request below.
+static const NSUInteger kKayokoFaircopyImageKeywordLengthLimit = 4000;
+
+/// Ask Faircopy to open the panel already tokenized
+/// (`faircopy://panel?keyword=…&mode=segment`).
+static NSString *const kKayokoFaircopySegmentMode = @"segment";
+
+/// Hands text to Faircopy: URL when it fits, pasteboard + notification otherwise.
+///
+/// Deliberately a C function rather than a method: the OCR hand-off outlives the
+/// list controller (the panel is dismissed before recognition starts), so it must
+/// stay callable after `self` is gone.
+static void KayokoSendTextToFaircopy(NSString *content, NSString *mode, NSUInteger limit) {
+    if ([content length] <= limit) {
+        NSURLComponents *components = [NSURLComponents componentsWithString:kKayokoFaircopyPanelURLString];
+        NSMutableArray<NSURLQueryItem *> *queryItems =
+            [NSMutableArray arrayWithObject:[NSURLQueryItem queryItemWithName:@"keyword" value:content]];
+        if ([mode length] > 0) {
+            [queryItems addObject:[NSURLQueryItem queryItemWithName:@"mode" value:mode]];
+        }
+        [components setQueryItems:queryItems];
+        NSURL *URL = [components URL];
+        if (URL) {
+            [[UIApplication sharedApplication] openURL:URL options:@{} completionHandler:nil];
+            return;
+        }
+    }
+
+    // Too long for a URL. The pasteboard carries the text but not the options, so
+    // this road always opens the normal panel (see the method doc below).
+    [[UIPasteboard generalPasteboard] setString:content];
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         (__bridge CFStringRef)kKayokoFaircopyPresentNotification,
+                                         NULL,
+                                         NULL,
+                                         YES);
+}
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -985,10 +1028,48 @@ NS_ASSUME_NONNULL_END
     }
 
     NSString *content = [item content];
-    // Only plain text can be handed over: Faircopy's keyword is a string and
-    // an image clip has no text to send.
-    if ([content length] == 0 || [[item imageName] length] > 0) {
+    NSString *imageName = [item imageName];
+    BOOL isImage = [imageName length] > 0;
+    if (!isImage && [content length] == 0) {
         return nil;
+    }
+
+    if (isImage) {
+        // 4.3.15: a picture cannot be handed over as-is — Faircopy's keyword is
+        // a string and 分词 has nothing to tokenize without words. Recognise the
+        // text first, then send it with `mode=segment` so the panel opens on the
+        // word chips instead of asking for one more tap.
+        //
+        // No availability probe here on purpose: asking the recogniser whether it
+        // can run means `dlopen`-ing Vision, and this method is called while the
+        // row is being revealed — a 30-80 ms framework load on SpringBoard's main
+        // thread would show up as a stutter on the first swipe. Vision's text
+        // recogniser exists on every supported iOS anyway; if it ever fails, the
+        // press falls through to the "no text" pill.
+        NSString *imagePath = [NSString
+            stringWithFormat:@"%@/%@", [KayokoPasteboardManager historyImagesPath], imageName];
+        UIContextualAction *imageAction = [UIContextualAction
+            contextualActionWithStyle:UIContextualActionStyleNormal
+                                title:@""
+                              handler:^(__unused UIContextualAction *action,
+                                        __unused __kindof UIView *sourceView,
+                                        void (^completionHandler)(BOOL)) {
+                                // Get the panel out of the way first: OCR takes a
+                                // moment, and watching a frozen list while it runs
+                                // is the thing that reads as a hang. The HUD goes
+                                // up on the window behind it.
+                                [[self delegate] historyListViewControllerDidRequestHide:self];
+                                [self sendImageToFaircopyForSegmentation:imagePath];
+                                if (completionHandler) {
+                                    completionHandler(YES);
+                                }
+                              }];
+        [imageAction setImage:[UIImage systemImageNamed:@"text.viewfinder"]];
+        [imageAction setBackgroundColor:[UIColor colorWithRed:0.498
+                                                        green:0.467
+                                                         blue:0.867
+                                                        alpha:1.0]];
+        return imageAction;
     }
 
     UIContextualAction *faircopyAction = [UIContextualAction
@@ -996,7 +1077,7 @@ NS_ASSUME_NONNULL_END
                             title:@""
                           handler:^(__unused UIContextualAction *action, __unused __kindof UIView *sourceView,
                                     void (^completionHandler)(BOOL)) {
-                            [self sendContentToFaircopy:content];
+                            KayokoSendTextToFaircopy(content, nil, kKayokoFaircopyKeywordLengthLimit);
                             // Kayoko gets out of the way; Faircopy's panel
                             // takes over the foreground.
                             [[self delegate] historyListViewControllerDidRequestHide:self];
@@ -1010,6 +1091,35 @@ NS_ASSUME_NONNULL_END
     [faircopyAction setImage:[UIImage systemImageNamed:@"wand.and.stars"]];
     [faircopyAction setBackgroundColor:[UIColor colorWithRed:0.498 green:0.467 blue:0.867 alpha:1.0]];
     return faircopyAction;
+}
+
+/// OCRs a clipboard picture and hands the text to Faircopy's 分词.
+///
+/// Runs entirely in SpringBoard: the recogniser is loaded on first use, the
+/// request runs off the main thread, and the panel is only summoned when there
+/// is something to tokenize. A picture with no text gets a short pill and no
+/// panel — opening Faircopy on nothing looks like the button failed.
+- (void)sendImageToFaircopyForSegmentation:(NSString *)imagePath {
+    [KayokoHUD showStatus:@"Reading text…"];
+    // No `self` in this block on purpose: the list controller can be gone by the
+    // time recognition finishes (the row's action dismisses the panel first), and
+    // a weak-self bail-out there would leave the pill on screen forever. Nothing
+    // in the completion needs the controller.
+    [KayokoTextRecognizer recognizeTextInImageAtPath:imagePath
+                                          completion:^(NSString *_Nullable text) {
+                                            if ([text length] == 0) {
+                                                [KayokoHUD showTransientStatus:@"No text in this image"];
+                                                UINotificationFeedbackGenerator *generator =
+                                                    [[UINotificationFeedbackGenerator alloc] init];
+                                                [generator notificationOccurred:
+                                                               UINotificationFeedbackTypeWarning];
+                                                return;
+                                            }
+                                            [KayokoHUD hide];
+                                            KayokoSendTextToFaircopy(text,
+                                                                     kKayokoFaircopySegmentMode,
+                                                                     kKayokoFaircopyImageKeywordLengthLimit);
+                                          }];
 }
 
 /// The floating-image action, on the left swipe next to delete.
@@ -1043,32 +1153,6 @@ NS_ASSUME_NONNULL_END
     [floatAction setImage:[UIImage systemImageNamed:@"rectangle.on.rectangle"]];
     [floatAction setBackgroundColor:[UIColor systemTealColor]];
     return floatAction;
-}
-
-/// Hands one clipboard item to Faircopy.
-///
-/// Short clips travel in the URL, which Faircopy's injector intercepts so the
-/// panel is presented already filled in. Longer clips would make an absurd URL,
-/// so those go the other way: write the clip to the pasteboard and post
-/// Faircopy's present notification, whose standalone panel falls back to the
-/// pasteboard contents.
-- (void)sendContentToFaircopy:(NSString *)content {
-    if ([content length] <= kKayokoFaircopyKeywordLengthLimit) {
-        NSURLComponents *components = [NSURLComponents componentsWithString:kKayokoFaircopyPanelURLString];
-        [components setQueryItems:@[ [NSURLQueryItem queryItemWithName:@"keyword" value:content] ]];
-        NSURL *URL = [components URL];
-        if (URL) {
-            [[UIApplication sharedApplication] openURL:URL options:@{} completionHandler:nil];
-            return;
-        }
-    }
-
-    [[UIPasteboard generalPasteboard] setString:content];
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                         (__bridge CFStringRef)kKayokoFaircopyPresentNotification,
-                                         NULL,
-                                         NULL,
-                                         YES);
 }
 
 #pragma mark - Gestures
