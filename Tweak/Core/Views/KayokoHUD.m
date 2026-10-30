@@ -23,6 +23,14 @@ static UIView *kKayokoHUDContainer = nil;
 /// by the timer that belonged to the spinner before it.
 static NSUInteger kKayokoHUDGeneration = 0;
 
+/// Private helpers, declared up front so `showStatus:` can call methods that are
+/// textually defined below it.
+@interface KayokoHUD ()
++ (void)presentStatus:(NSString *)status transient:(BOOL)transient;
++ (void)fadeOutCurrentPill;
++ (nullable UIWindow *)keyWindow;
+@end
+
 @implementation KayokoHUD
 
 + (void)showStatus:(NSString *)status {

@@ -58,8 +58,16 @@ static NSString *const kKayokoRecognitionLanguageEnglish = @"en-US";
 - (NSString *)string;
 @end
 
-@implementation KayokoTextRecognizer
+/// Private helpers, declared up front so the block below does not have to call a
+/// method that is textually defined further down.
+@interface KayokoTextRecognizer ()
++ (nullable NSString *)recognizeSynchronouslyAtPath:(NSString *)path;
++ (nullable NSString *)textFromObservations:(NSArray *)observations;
++ (BOOL)needsSpaceBetween:(NSString *)previous andNext:(NSString *)next;
++ (UIImage *)downscaledImage:(UIImage *)image maxPixelSize:(CGFloat)maxPixelSize;
+@end
 
+@implementation KayokoTextRecognizer
 + (BOOL)isAvailable {
     static dispatch_once_t onceToken;
     static BOOL available = NO;
