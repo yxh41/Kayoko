@@ -36,7 +36,16 @@ static const NSUInteger kKayokoFaircopyKeywordLengthLimit = 1000;
 /// `faircopy` scheme, so this host is simply "recognise this and bounce back";
 /// Faircopy's injector only intercepts the `panel` host, which is what lets the
 /// request leave SpringBoard at all.
-static NSString *const kKayokoFaircopyOCRURLString = @"faircopy://ocr";
+///
+/// 4.3.23: the URL also carries `?caller=<our bundle id>`. iOS reports
+/// `com.apple.springboard` as the source application for this openURL (Faircopy
+/// 3.0.80 logs it verbatim: `ocr: url received src=com.apple.springboard`), so
+/// AIGate's "bounce back to whoever opened me" landed the user on the home
+/// screen — and the panel, addressed to the home screen, had to be summoned
+/// there. AIGate 3.0.82 prefers this explicit caller: the bounce returns here
+/// and the panel is presented in this process, the way it already works in
+/// Safari.
+static NSString *const kKayokoFaircopyOCRURLString = @"faircopy://ocr?caller=";
 
 /// Drop box for the picture and its answer. Same shared directory Faircopy's
 /// panel hand-off and app-search stores already use, and the one place both
@@ -1213,7 +1222,20 @@ NS_ASSUME_NONNULL_END
     KayokoObserveFaircopyOCRResult();
     gKayokoFaircopyOCRHandoffPending = YES;
 
-    NSURL *URL = [NSURL URLWithString:kKayokoFaircopyOCRURLString];
+    // 4.3.23: name ourselves as the caller. `sourceApplication` is useless here
+    // (iOS reports `com.apple.springboard`, see the constant above), so the
+    // bounce target and the panel's target both come from this query item. A
+    // bundle id needs no percent-encoding.
+    NSString *caller = [NSBundle mainBundle].bundleIdentifier ?: @"";
+    NSString *handoffURL = [kKayokoFaircopyOCRURLString stringByAppendingString:caller];
+    NSURL *URL = [NSURL URLWithString:handoffURL];
+    if (!URL) {
+        // Cannot build the URL at all: fail like "not installed" rather than
+        // opening nothing and leaving the pill spinning for 12 s.
+        gKayokoFaircopyOCRHandoffPending = NO;
+        [KayokoHUD showTransientStatus:@"Faircopy is not installed"];
+        return;
+    }
     // No `self` in either block on purpose: the list controller is gone by the
     // time any of this runs (the row's action dismisses the panel first), and a
     // weak-self bail-out would leave the pill on screen forever. Nothing here
