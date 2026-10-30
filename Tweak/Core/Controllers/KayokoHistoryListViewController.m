@@ -61,6 +61,23 @@ static NSString *const kKayokoFaircopyOCRResultPath =
 /// Posted by AIGate once the recognition finished, whatever the outcome.
 static NSString *const kKayokoFaircopyOCRResultNotification = @"wiki.qaq.faircopy.ocr.result";
 
+/// 4.3.24: ask the resident AIGate process to read the picture where it is.
+///
+/// The app switch only ever existed because Vision's accurate network refuses
+/// to run inside SpringBoard. AIGate is the process that can run it, and while
+/// it is parked in the background a Darwin notification wakes it without
+/// bringing anything forward: the list the user is looking at stays in front,
+/// and the panel is presented on top of it.
+///
+/// KEEP IN SYNC with FaircopyImageOCR.requestNotification.
+static NSString *const kKayokoFaircopyOCRRequestNotification = @"wiki.qaq.faircopy.ocr.request";
+
+/// How long to wait for that answer before taking the visible road. AIGate
+/// answers within a second when it is alive (the recognition itself takes
+/// 0.2-1.2 s); silence means it was jetsammed or has not been opened since
+/// install, and the app switch is then the only way to get the picture read.
+static const NSTimeInterval kKayokoFaircopyOCRSilentWait = 2.0;
+
 /// A hand-off that dies mid-flight (AIGate killed by jetsam, bounce lost) must
 /// not leave the pill spinning on the home screen forever.
 static const NSTimeInterval kKayokoFaircopyOCRTimeout = 12.0;
@@ -68,6 +85,10 @@ static const NSTimeInterval kKayokoFaircopyOCRTimeout = 12.0;
 /// One hand-off at a time: a late result from a previous picture must not take
 /// down the pill of the current one, or claim its words.
 static BOOL gKayokoFaircopyOCRHandoffPending = NO;
+
+/// 4.3.24: the visible road is fired at most once per hand-off — the silent
+/// answer and the 2 s timeout can both decide to take it.
+static BOOL gKayokoFaircopyOCRVisibleRoadIssued = NO;
 
 /// Hands text to Faircopy: URL when it fits, pasteboard + notification otherwise.
 ///
@@ -133,22 +154,41 @@ static BOOL KayokoPrepareFaircopyOCRHandoff(NSString *imagePath) {
     return [data writeToFile:kKayokoFaircopyOCRInputPath options:NSDataWritingAtomic error:nil];
 }
 
+/// Runs the visible road: hand the picture to AIGate through `faircopy://ocr`,
+/// which brings it to the front for the length of one recognition.
+///
+/// Only used when the silent request went unanswered (AIGate was jetsammed or
+/// has not been opened since install) or when the silent attempt itself could
+/// not finish. Guarded so a slow answer and the 2 s timeout cannot both fire it.
+static void KayokoRunFaircopyOCRVisibleRoad(void);
+
 /// Reads AIGate's answer and settles the pill. `ok` means the panel is on its
-/// way; anything else means the picture had no text (or the hand-off failed), and
-/// staying silent there would look exactly like a dead button.
+/// way; `retry` means the silent attempt could not finish and the visible road
+/// must run; anything else means the picture had no text (or the hand-off
+/// failed), and staying silent there would look exactly like a dead button.
 static void KayokoSettleFaircopyOCRHandoff(void) {
     if (!gKayokoFaircopyOCRHandoffPending) {
         return;
     }
-    gKayokoFaircopyOCRHandoffPending = NO;
 
     NSData *data = [NSData dataWithContentsOfFile:kKayokoFaircopyOCRResultPath];
     NSDictionary *result = data
         ? [NSJSONSerialization JSONObjectWithData:data options:0 error:nil] : nil;
     if (![result isKindOfClass:[NSDictionary class]]) {
+        gKayokoFaircopyOCRHandoffPending = NO;
         [KayokoHUD hide];
         return;
     }
+    if ([result[@"retry"] boolValue]) {
+        // 4.3.24: the background attempt gave up — the picture could not be
+        // read there, or the hand-off file could not be written. Take the
+        // visible road rather than telling the user there was no text, which
+        // is what a zero-length answer would look like. The hand-off stays
+        // pending: that road writes the second answer.
+        KayokoRunFaircopyOCRVisibleRoad();
+        return;
+    }
+    gKayokoFaircopyOCRHandoffPending = NO;
     if ([result[@"ok"] boolValue]) {
         [KayokoHUD hide];
         return;
@@ -1213,6 +1253,12 @@ NS_ASSUME_NONNULL_END
 /// process. What this side owns is the pill — it goes up before the hand-off,
 /// and AIGate's answer takes it down, both when the panel is on its way and when
 /// the picture simply had no text.
+///
+/// 4.3.24: two roads, silent first. `faircopy/ocr/request` asks the AIGate
+/// process that is already alive to read the picture where it is — nothing is
+/// brought to the front, so the list stays on screen and the panel arrives on
+/// top of it. The visible `faircopy://ocr` road (one app switch) is only taken
+/// when that request goes unanswered, or when AIGate answers `retry`.
 - (void)sendImageToFaircopyForSegmentation:(NSString *)imagePath {
     [KayokoHUD showStatus:@"Reading text…"];
     if (!KayokoPrepareFaircopyOCRHandoff(imagePath)) {
@@ -1221,11 +1267,50 @@ NS_ASSUME_NONNULL_END
     }
     KayokoObserveFaircopyOCRResult();
     gKayokoFaircopyOCRHandoffPending = YES;
+    gKayokoFaircopyOCRVisibleRoadIssued = NO;
 
-    // 4.3.23: name ourselves as the caller. `sourceApplication` is useless here
-    // (iOS reports `com.apple.springboard`, see the constant above), so the
-    // bounce target and the panel's target both come from this query item. A
-    // bundle id needs no percent-encoding.
+    // The picture is already in the drop box; the notification only says
+    // "there is work". AIGate's process is woken by it without being shown.
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                         (__bridge CFStringRef)kKayokoFaircopyOCRRequestNotification,
+                                         NULL, NULL, YES);
+
+    // Silence means AIGate is not running (jetsammed, or never opened since
+    // install) — then the switch is the only way to get the picture read.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(kKayokoFaircopyOCRSilentWait * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+                     if (!gKayokoFaircopyOCRHandoffPending) {
+                         return;
+                     }
+                     KayokoRunFaircopyOCRVisibleRoad();
+                   });
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
+                                 (int64_t)(kKayokoFaircopyOCRTimeout * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+                     if (!gKayokoFaircopyOCRHandoffPending) {
+                         return;
+                     }
+                     gKayokoFaircopyOCRHandoffPending = NO;
+                     [KayokoHUD hide];
+                   });
+}
+
+/// The one-app-switch road, kept from 4.3.22/4.3.23: open `faircopy://ocr` so
+/// AIGate comes to the front for the length of one recognition and bounces
+/// back. Guarded, because a slow silent answer and the 2 s timeout can race.
+static void KayokoRunFaircopyOCRVisibleRoad(void) {
+    if (gKayokoFaircopyOCRVisibleRoadIssued) {
+        return;
+    }
+    gKayokoFaircopyOCRVisibleRoadIssued = YES;
+
+    // 4.3.23: name ourselves as the caller. This code runs inside SpringBoard
+    // (see KayokoCore.plist), so `mainBundle` IS `com.apple.springboard` — the
+    // same value iOS already reports as `sourceApplication`, which is why the
+    // panel lands on the home screen either way. The item stays because a
+    // caller living in the Kayoko app process would then bounce back to itself.
     NSString *caller = [NSBundle mainBundle].bundleIdentifier ?: @"";
     NSString *handoffURL = [kKayokoFaircopyOCRURLString stringByAppendingString:caller];
     NSURL *URL = [NSURL URLWithString:handoffURL];
@@ -1257,16 +1342,6 @@ NS_ASSUME_NONNULL_END
                                  [generator notificationOccurred:UINotificationFeedbackTypeError];
                                });
                              }];
-
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                 (int64_t)(kKayokoFaircopyOCRTimeout * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-                     if (!gKayokoFaircopyOCRHandoffPending) {
-                         return;
-                     }
-                     gKayokoFaircopyOCRHandoffPending = NO;
-                     [KayokoHUD hide];
-                   });
 }
 
 /// The floating-image action, on the left swipe next to delete.
