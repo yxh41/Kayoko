@@ -110,11 +110,13 @@ static const double kKayokoAcceptedQuality = 0.72;
 @interface KayokoTextRecognizer ()
 + (nullable NSString *)recognizeSynchronouslyAtPath:(NSString *)path;
 + (nullable UIImage *)preparedImage:(UIImage *)image;
-+ (NSArray<NSDictionary<NSString *, id> *> *)recognitionAttempts;
++ (NSArray<NSDictionary<NSString *, id> *> *)recognitionPlan;
 + (nullable NSArray *)observationsForImage:(CGImageRef)cgImage
                                 correction:(BOOL)correction
                                  languages:(NSArray<NSString *> *)languages
                                      level:(NSInteger)level
+                                  revision:(NSUInteger)revision
+                                   variant:(NSString *)variant
                                  passIndex:(NSUInteger)passIndex
                                diagnostics:(NSMutableString *)diagnostics;
 + (nullable NSArray<NSDictionary<NSString *, id> *> *)boxesFromObservations:(NSArray *)observations;
@@ -334,6 +336,63 @@ static BOOL KayokoAccurateLevelSupportsChinese(void) {
 }
 
 
+/// Redraws an image as 8-bit sRGB with no alpha channel.
+///
+/// The accurate recogniser is a convolutional network, and its failure mode is
+/// `Error computing NN outputs` — the backend refusing the tensors it was handed
+/// rather than a language or a revision being wrong. Three properties of the
+/// source image can trigger that, and all three are fixed by forcing a plain
+/// bitmap through a known context:
+///
+///  - a textured format. Screenshots are frequently Display P3, and photos pasted
+///    from the camera roll can carry extended-range or 16-bit data;
+///  - an alpha channel. A clipboard image is often a straight PNG, and an opaque
+///    network input does not want premultiplied alpha;
+///  - an extreme aspect ratio. Long screenshots survive the 4096 cap at a shape
+///    no OCR network was trained on.
+///
+/// `maxEdge` 0 keeps the current pixel size (format fix only); anything else also
+/// scales the longest edge down to that. Returns a +1 image, or NULL.
+static CGImageRef KayokoCreateNormalizedImage(CGImageRef source, CGFloat maxEdge) {
+    if (!source) {
+        return NULL;
+    }
+    CGFloat width = (CGFloat)CGImageGetWidth(source);
+    CGFloat height = (CGFloat)CGImageGetHeight(source);
+    if (width < 1.0 || height < 1.0) {
+        return NULL;
+    }
+    CGFloat scale = 1.0;
+    if (maxEdge > 0.0) {
+        CGFloat longest = MAX(width, height);
+        if (longest > maxEdge) {
+            scale = maxEdge / longest;
+        }
+    }
+    size_t targetWidth = (size_t)MAX(1.0, round(width * scale));
+    size_t targetHeight = (size_t)MAX(1.0, round(height * scale));
+
+    CGColorSpaceRef space = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    if (!space) {
+        return NULL;
+    }
+    CGContextRef context = CGBitmapContextCreate(NULL, targetWidth, targetHeight, 8,
+                                                 targetWidth * 4, space,
+                                                 kCGImageAlphaNoneSkipFirst |
+                                                     kCGBitmapByteOrder32Little);
+    CGColorSpaceRelease(space);
+    if (!context) {
+        return NULL;
+    }
+    CGContextSetInterpolationQuality(context, kCGInterpolationHigh);
+    CGContextSetShouldAntialias(context, true);
+    CGContextDrawImage(context, CGRectMake(0.0, 0.0, (CGFloat)targetWidth, (CGFloat)targetHeight),
+                       source);
+    CGImageRef normalized = CGBitmapContextCreateImage(context);
+    CGContextRelease(context);
+    return normalized;
+}
+
 @implementation KayokoTextRecognizer
 + (BOOL)isAvailable {
     static dispatch_once_t onceToken;
@@ -391,37 +450,69 @@ static BOOL KayokoAccurateLevelSupportsChinese(void) {
 /// the nearest Latin approximation. Forcing zh-Hans alone removes the choice:
 /// that model also reads Latin text, so mixed screenshots still come out whole.
 ///
-/// No attempt carries a revision any more: every pass runs at the revision the
-/// system reports as current (see `KayokoCurrentRecognitionRevision`). The
-/// revision-2 fallback is gone as well — 4.3.19's silence came from probing one
-/// revision and performing another, so a second revision is the last thing worth
-/// trying, not the first.
+/// The order passes are tried in.
 ///
-/// The trailing fast pass is a probe, not a fallback. 4.3.19 handed accurate the
-/// same image, the same handler and the same languages and got zero observations
-/// on all five passes, while 4.3.18's fast request read hundreds of characters
-/// off the very same picture. Repeating that request at the fast level separates
-/// "the accurate engine refuses to run here" from "the image never reached
-/// Vision", which are two completely different bugs. Its result is logged and
-/// thrown away: Latin soup is exactly what this feature is being fixed to stop
-/// producing.
-+ (NSArray<NSDictionary<NSString *, id> *> *)recognitionAttempts {
+/// Every entry is `variant` (which image to hand Vision) × `revision` (0 = the
+/// system's current one) × language set. 4.3.20 proved the accurate level itself
+/// is the only thing that fails: all four accurate passes returned
+/// `Error computing NN outputs` while the trailing fast probe read six boxes off
+/// the same picture. That error comes from the network backend rejecting its
+/// input, so the two levers are the image and the model generation — hence the
+/// ladder rather than a single request.
+///
+/// Variants, cheapest first:
+///   orig       — exactly what `preparedImage:` produced
+///   opaque     — same pixels, redrawn as 8-bit sRGB with no alpha
+///   opaque1600 — same, longest edge capped at 1600
+///
+/// Revisions: the current one first, then 2 as a different model generation. The
+/// first entry that yields readable text ends the ladder.
+///
+/// The last entry is a probe, not a fallback: a fast-level read is logged and
+/// discarded. Latin soup is exactly what this feature is being fixed to stop
+/// producing, so it is never handed to Faircopy.
++ (NSArray<NSDictionary<NSString *, id> *> *)recognitionPlan {
     return @[
-        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ],
+        @{@"variant" : @"orig",
+          @"languages" : @[ kKayokoRecognitionLanguageChinese ],
           @"correction" : @YES,
-          @"level" : @(kKayokoRecognitionLevelAccurate)},
-        @{@"languages" : @[ kKayokoRecognitionLanguageChinese ],
-          @"correction" : @NO,
-          @"level" : @(kKayokoRecognitionLevelAccurate)},
-        @{@"languages" : @[ kKayokoRecognitionLanguageChinese, kKayokoRecognitionLanguageEnglish ],
+          @"level" : @(kKayokoRecognitionLevelAccurate),
+          @"revision" : @0},
+        @{@"variant" : @"opaque",
+          @"languages" : @[ kKayokoRecognitionLanguageChinese ],
           @"correction" : @YES,
-          @"level" : @(kKayokoRecognitionLevelAccurate)},
-        @{@"languages" : @[ kKayokoRecognitionLanguageEnglish ],
+          @"level" : @(kKayokoRecognitionLevelAccurate),
+          @"revision" : @0},
+        @{@"variant" : @"opaque1600",
+          @"languages" : @[ kKayokoRecognitionLanguageChinese ],
           @"correction" : @YES,
-          @"level" : @(kKayokoRecognitionLevelAccurate)},
-        @{@"languages" : @[ kKayokoRecognitionLanguageEnglish ],
+          @"level" : @(kKayokoRecognitionLevelAccurate),
+          @"revision" : @0},
+        @{@"variant" : @"orig",
+          @"languages" : @[ kKayokoRecognitionLanguageChinese ],
+          @"correction" : @YES,
+          @"level" : @(kKayokoRecognitionLevelAccurate),
+          @"revision" : @2},
+        @{@"variant" : @"opaque",
+          @"languages" : @[ kKayokoRecognitionLanguageChinese ],
+          @"correction" : @YES,
+          @"level" : @(kKayokoRecognitionLevelAccurate),
+          @"revision" : @2},
+        @{@"variant" : @"opaque",
+          @"languages" : @[ kKayokoRecognitionLanguageChinese, kKayokoRecognitionLanguageEnglish ],
+          @"correction" : @YES,
+          @"level" : @(kKayokoRecognitionLevelAccurate),
+          @"revision" : @0},
+        @{@"variant" : @"opaque",
+          @"languages" : @[ kKayokoRecognitionLanguageEnglish ],
+          @"correction" : @YES,
+          @"level" : @(kKayokoRecognitionLevelAccurate),
+          @"revision" : @0},
+        @{@"variant" : @"orig",
+          @"languages" : @[ kKayokoRecognitionLanguageEnglish ],
           @"correction" : @YES,
           @"level" : @(kKayokoRecognitionLevelFast),
+          @"revision" : @0,
           @"diagnosticOnly" : @YES},
     ];
 }
@@ -446,28 +537,44 @@ static BOOL KayokoAccurateLevelSupportsChinese(void) {
     BOOL bestHasCJK = NO;
     NSString *bestPass = nil;
 
+    // Both normalised variants are built once. Redrawing a full screenshot is a
+    // few milliseconds, and rebuilding it per pass would dominate the ladder.
+    CGImageRef opaqueImage = KayokoCreateNormalizedImage(cgImage, 0.0);
+    CGImageRef opaqueSmall = KayokoCreateNormalizedImage(cgImage, 1600.0);
+
     NSUInteger passIndex = 0;
-    for (NSDictionary<NSString *, id> *attempt in [self recognitionAttempts]) {
+    for (NSDictionary<NSString *, id> *attempt in [self recognitionPlan]) {
         passIndex++;
         NSArray<NSString *> *languages = attempt[@"languages"];
         BOOL correction = [attempt[@"correction"] boolValue];
         NSInteger level = attempt[@"level"]
                               ? [attempt[@"level"] integerValue]
                               : kKayokoRecognitionLevelAccurate;
+        NSUInteger revision = attempt[@"revision"] ? [attempt[@"revision"] unsignedIntegerValue] : 0;
         BOOL diagnosticOnly = [attempt[@"diagnosticOnly"] boolValue];
+        NSString *variant = attempt[@"variant"] ?: @"orig";
+        CGImageRef workingImage = cgImage;
+        if ([variant isEqualToString:@"opaque"] && opaqueImage) {
+            workingImage = opaqueImage;
+        } else if ([variant isEqualToString:@"opaque1600"] && opaqueSmall) {
+            workingImage = opaqueSmall;
+        }
         NSMutableString *diagnostics = [NSMutableString string];
-        NSArray *observations = [self observationsForImage:cgImage
+        NSArray *observations = [self observationsForImage:workingImage
                                                 correction:correction
                                                  languages:languages
                                                      level:level
+                                                  revision:revision
+                                                   variant:variant
                                                  passIndex:passIndex
                                                diagnostics:diagnostics];
         NSArray<NSDictionary<NSString *, id> *> *boxes = [self boxesFromObservations:observations];
         NSString *text = [self assembleTextFromBoxes:boxes];
         double quality = KayokoQualityForBoxes(boxes);
         NSUInteger cjk = KayokoCJKCount(text);
-        NSString *label = [NSString stringWithFormat:@"%@%@",
+        NSString *label = [NSString stringWithFormat:@"%@/%@%@",
                                                     [languages componentsJoinedByString:@"+"],
+                                                    variant,
                                                     correction ? @"" : @"-nc"];
         NSLog(@"Kayoko: OCR pass %@ quality=%.2f cjk=%lu chars=%lu", label, quality,
               (unsigned long)cjk, (unsigned long)text.length);
@@ -516,10 +623,20 @@ static BOOL KayokoAccurateLevelSupportsChinese(void) {
         }
     }
 
+    if (opaqueImage) {
+        CGImageRelease(opaqueImage);
+    }
+    if (opaqueSmall) {
+        CGImageRelease(opaqueSmall);
+    }
+
     NSLog(@"Kayoko: OCR %@ in %.0f ms, %lu chars, quality %.2f, from %@",
           bestText.length > 0 ? @"ok" : @"empty",
           [[NSDate date] timeIntervalSinceDate:startedAt] * 1000.0,
           (unsigned long)bestText.length, bestQuality, bestPass ?: @"nothing");
+    // The summary repeats the winning variant because that is the one thing worth
+    // knowing from a single screenshot of the log: whether the plain original was
+    // enough, whether the redraw fixed the network, or whether nothing did.
     KayokoOCRAppendLog([NSString stringWithFormat:@"pass=%@ lvl=acc q=%.2f cjk=%lu chars=%lu ms=%.0f",
                                                   bestPass ?: @"nothing", bestQuality,
                                                   (unsigned long)KayokoCJKCount(bestText),
@@ -545,23 +662,28 @@ static BOOL KayokoAccurateLevelSupportsChinese(void) {
                                 correction:(BOOL)correction
                                  languages:(NSArray<NSString *> *)languages
                                      level:(NSInteger)level
+                                  revision:(NSUInteger)revision
+                                   variant:(NSString *)variant
                                  passIndex:(NSUInteger)passIndex
                                diagnostics:(NSMutableString *)diagnostics {
     Class handlerClass = NSClassFromString(@"VNImageRequestHandler");
     Class requestClass = NSClassFromString(@"VNRecognizeTextRequest");
     if (!handlerClass || !requestClass) {
-        [diagnostics appendFormat:@"p%lu req=CLASS-MISSING",
-                                  (unsigned long)passIndex];
+        [diagnostics appendFormat:@"p%lu %@ req=CLASS-MISSING",
+                                  (unsigned long)passIndex, variant];
         return nil;
     }
+
+    // 0 means "whatever the system considers current". Resolved here so the value
+    // written to the log is the one actually performed, not the one assumed.
+    NSUInteger requestedRevision = revision > 0 ? revision : KayokoCurrentRecognitionRevision();
 
     id handler = [(id)handlerClass alloc];
     handler = [handler initWithCGImage:cgImage options:@{}];
     id request = [[(id)requestClass alloc] init];
     [request setRecognitionLevel:level];
-    NSUInteger revision = KayokoCurrentRecognitionRevision();
-    if (revision > 0) {
-        [request setRevision:revision];
+    if (requestedRevision > 0) {
+        [request setRevision:requestedRevision];
     }
     [request setRecognitionLanguages:languages];
     [request setUsesLanguageCorrection:correction];
@@ -572,9 +694,10 @@ static BOOL KayokoAccurateLevelSupportsChinese(void) {
     NSInteger appliedLevel = [(id)request respondsToSelector:@selector(recognitionLevel)]
                                  ? (NSInteger)[request recognitionLevel]
                                  : -1;
-    [diagnostics appendFormat:@"p%lu %@ rev%lu lvl=%ld corr=%d",
+    [diagnostics appendFormat:@"p%lu %@/%@ rev%lu lvl=%ld corr=%d",
                               (unsigned long)passIndex,
                               [languages componentsJoinedByString:@"+"],
+                              variant,
                               (unsigned long)appliedRevision,
                               (long)appliedLevel,
                               correction ? 1 : 0];
