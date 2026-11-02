@@ -72,11 +72,55 @@ static NSString *const kKayokoFaircopyOCRResultNotification = @"wiki.qaq.faircop
 /// KEEP IN SYNC with FaircopyImageOCR.requestNotification.
 static NSString *const kKayokoFaircopyOCRRequestNotification = @"wiki.qaq.faircopy.ocr.request";
 
-/// How long to wait for that answer before taking the visible road. AIGate
-/// answers within a second when it is alive (the recognition itself takes
-/// 0.2-1.2 s); silence means it was jetsammed or has not been opened since
-/// install, and the app switch is then the only way to get the picture read.
-static const NSTimeInterval kKayokoFaircopyOCRSilentWait = 2.0;
+/// How long to wait for that answer before taking the visible road.
+///
+/// 4.3.27: one flat value was shorter than the work. A cold accurate pass on a
+/// full-screen screenshot measures 4.9 s (`faircopy_ocr.log` 18:51:31
+/// `t=4883ms`), a warm one 1.6 s, so a 2 s timer always won on the first picture
+/// after a boot or after the worker had been idle for a while: the app switch
+/// fired, and the panel arrived on top of it a second later. That is the
+/// "首次还是会跳转一下" report, and it is the timer, not the recognition.
+///
+/// The resident worker's heartbeat tells the two cases apart, so each road now
+/// gets the wait it deserves — long enough for a cold pass when somebody is
+/// actually working on the picture, and *shorter* than before when nobody is,
+/// because that is when the fallback is the only road left.
+///
+/// KEEP IN SYNC with FaircopyDaemon.heartbeatPath.
+static NSString *const kKayokoFaircopyDaemonHeartbeatPath =
+    @"/var/mobile/Library/Preferences/wiki.qaq.ai.gate/faircopy_ocr_daemon.json";
+
+/// KEEP IN SYNC with `FaircopyDaemon.isAlive()` (15 s).
+static const NSTimeInterval kKayokoFaircopyDaemonHeartbeatTTL = 15.0;
+
+/// Long enough for a cold accurate pass plus the hand-off write.
+static const NSTimeInterval kKayokoFaircopyOCRSilentWaitResident = 6.0;
+
+/// No worker: do not make the user stare at a pill before doing the only thing
+/// that can work.
+static const NSTimeInterval kKayokoFaircopyOCRSilentWaitAbsent = 0.8;
+
+/// True while a launchd-started worker is answering requests.
+///
+/// Read-only and failure-tolerant on purpose: SpringBoard is the wrong place to
+/// be strict, and a missing or unparsable heartbeat means "nobody there", which
+/// simply takes the road that worked before 4.3.24.
+static BOOL KayokoFaircopyResidentWorkerIsAlive(void) {
+    NSData *data = [NSData dataWithContentsOfFile:kKayokoFaircopyDaemonHeartbeatPath];
+    if (data.length == 0) {
+        return NO;
+    }
+    NSDictionary *object = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (![object isKindOfClass:[NSDictionary class]]) {
+        return NO;
+    }
+    NSNumber *at = object[@"at"];
+    if (![at isKindOfClass:[NSNumber class]]) {
+        return NO;
+    }
+    return [NSDate date].timeIntervalSince1970 - at.doubleValue <
+           kKayokoFaircopyDaemonHeartbeatTTL;
+}
 
 /// 4.3.25: which app the panel belongs on.
 ///
@@ -1371,10 +1415,13 @@ NS_ASSUME_NONNULL_END
                                          (__bridge CFStringRef)kKayokoFaircopyOCRRequestNotification,
                                          NULL, NULL, YES);
 
-    // Silence means AIGate is not running (jetsammed, or never opened since
-    // install) — then the switch is the only way to get the picture read.
+    // Silence means the request was not answered. 4.3.27: how long silence has
+    // to last depends on whether the worker is there — see the constants above.
+    const NSTimeInterval silentWait = KayokoFaircopyResidentWorkerIsAlive()
+        ? kKayokoFaircopyOCRSilentWaitResident
+        : kKayokoFaircopyOCRSilentWaitAbsent;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                 (int64_t)(kKayokoFaircopyOCRSilentWait * NSEC_PER_SEC)),
+                                 (int64_t)(silentWait * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
                      if (!gKayokoFaircopyOCRHandoffPending) {
                          return;
