@@ -289,10 +289,10 @@ NS_ASSUME_NONNULL_END
 
     if ([self state] == KayokoScriptPanelStateList) {
         KayokoScript *script = [[self scripts] objectAtIndex:(NSUInteger)[indexPath row]];
-        [cell updateWithTitle:[script displayName] showsChevron:YES truncatesInMiddle:NO];
+        [cell updateWithTitle:[script displayName] truncatesInMiddle:NO];
     } else {
         NSString *value = [[self values] objectAtIndex:(NSUInteger)[indexPath row]];
-        [cell updateWithTitle:value showsChevron:YES truncatesInMiddle:YES];
+        [cell updateWithTitle:value truncatesInMiddle:YES];
     }
 
     return cell;

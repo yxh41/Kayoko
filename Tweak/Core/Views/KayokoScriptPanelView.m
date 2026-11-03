@@ -14,6 +14,8 @@ static CGFloat const kKayokoScriptPanelVerticalFadeHeight = 24;
 static CGFloat const kKayokoScriptPanelFooterHorizontalInset = 16;
 static CGFloat const kKayokoScriptPanelFooterBottomInset = 12;
 static CGFloat const kKayokoScriptPanelButtonHeight = 40;
+static CGFloat const kKayokoScriptPanelListTopInset = 8;
+static CGFloat const kKayokoScriptPanelListBottomInset = 12;
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -54,6 +56,7 @@ NS_ASSUME_NONNULL_END
             setAccessibilityLabel:KayokoScriptPanelLocalizedString(@"Back", @"Back")];
         [[_headerView trailingButton] setHidden:YES];
         [[_headerView alternateTrailingButton] setHidden:YES];
+        [[_headerView scriptButton] setHidden:YES];
         [self addSubview:_headerView];
 
         // The header has to stay put while content slides, so everything else lives in its own container.
@@ -66,7 +69,12 @@ NS_ASSUME_NONNULL_END
         [_tableView setSeparatorInset:UIEdgeInsetsMake(0, 16, 0, 0)];
         [_tableView setRowHeight:52];
         [_tableView setEstimatedRowHeight:52];
-        [_tableView setContentInset:UIEdgeInsetsMake(4, 0, 16, 0)];
+        // The panel is shown before its final bounds are known, and UIKit's automatic inset adjustment used to
+        // hand back a stale safe-area value at that moment: the list then started above the header and the
+        // first row was clipped. A fixed inset keeps the rest position deterministic.
+        [_tableView setContentInsetAdjustmentBehavior:UIScrollViewContentInsetAdjustmentNever];
+        [_tableView setContentInset:UIEdgeInsetsMake(kKayokoScriptPanelListTopInset, 0,
+                                                     kKayokoScriptPanelListBottomInset, 0)];
         [_transitionContentView addSubview:_tableView];
 
         _noticeLabel = [[UILabel alloc] init];
@@ -91,6 +99,7 @@ NS_ASSUME_NONNULL_END
         [_resultTextView setEditable:NO];
         [_resultTextView setSelectable:NO];
         [_resultTextView setAutomaticallyAdjustsScrollIndicatorInsets:NO];
+        [_resultTextView setContentInsetAdjustmentBehavior:UIScrollViewContentInsetAdjustmentNever];
         [_resultTextView setTextContainerInset:UIEdgeInsetsMake(8, 16, 8, 16)];
         [[_resultTextView textContainer] setLineFragmentPadding:0];
         [_resultView addSubview:_resultTextView];
@@ -170,7 +179,7 @@ NS_ASSUME_NONNULL_END
         [[tableView topAnchor] constraintEqualToAnchor:[transitionContentView topAnchor]],
         [[tableView leadingAnchor] constraintEqualToAnchor:[safeArea leadingAnchor]],
         [[tableView trailingAnchor] constraintEqualToAnchor:[safeArea trailingAnchor]],
-        [[tableView bottomAnchor] constraintEqualToAnchor:[transitionContentView bottomAnchor]],
+        [[tableView bottomAnchor] constraintEqualToAnchor:[safeArea bottomAnchor]],
 
         [[noticeLabel centerXAnchor] constraintEqualToAnchor:[transitionContentView centerXAnchor]],
         [[noticeLabel centerYAnchor] constraintEqualToAnchor:[transitionContentView centerYAnchor]],
@@ -209,7 +218,8 @@ NS_ASSUME_NONNULL_END
     [[self resultView] setHidden:YES];
     [[self tableView] setHidden:NO];
     [[self tableView] reloadData];
-    [[self tableView] setContentOffset:CGPointMake(0, -[[self tableView] adjustedContentInset].top) animated:NO];
+    [self layoutIfNeeded];
+    [[self tableView] setContentOffset:CGPointMake(0, -kKayokoScriptPanelListTopInset) animated:NO];
     [self showNotice:nil];
 }
 

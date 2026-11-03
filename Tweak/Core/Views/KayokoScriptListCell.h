@@ -13,7 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property(nonatomic, strong, readonly) UILabel *titleLabel;
 
-- (void)updateWithTitle:(NSString *)title showsChevron:(BOOL)showsChevron truncatesInMiddle:(BOOL)truncatesInMiddle;
+- (void)updateWithTitle:(NSString *)title truncatesInMiddle:(BOOL)truncatesInMiddle;
 
 @end
 

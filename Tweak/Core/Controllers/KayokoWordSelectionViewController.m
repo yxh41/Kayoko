@@ -271,7 +271,7 @@ NS_ASSUME_NONNULL_END
     BOOL hasText = [kayokoWordSelectionTextByTrimmingBoundaryNewlines(content) length] > 0;
 
     [headerView updateStyleForButton:scriptButton
-                       withImageName:@"wand.and.stars"
+                       withImageName:@"terminal"
                            imageSize:kKayokoBackButtonImageSize
                            tintColor:[UIColor labelColor]];
     // Scripts always run on something, so the entry stays tappable whenever the item carries text; the

@@ -7,14 +7,12 @@
 
 static CGFloat const kKayokoScriptListCellHeight = 52;
 static CGFloat const kKayokoScriptListCellHorizontalInset = 16;
-static CGFloat const kKayokoScriptListCellChevronTrailingInset = 18;
 
 NS_ASSUME_NONNULL_BEGIN
 
 @interface KayokoScriptListCell ()
 
 @property(nonatomic, strong, readwrite) UILabel *titleLabel;
-@property(nonatomic, strong) UIImageView *chevronImageView;
 
 @end
 
@@ -49,27 +47,14 @@ NS_ASSUME_NONNULL_END
         [[self titleLabel] setNumberOfLines:1];
         [self addSubview:[self titleLabel]];
 
-        _chevronImageView = [[UIImageView alloc] init];
-        UIImageSymbolConfiguration *configuration =
-            [UIImageSymbolConfiguration configurationWithPointSize:13 weight:UIImageSymbolWeightSemibold];
-        [[self chevronImageView] setImage:[UIImage systemImageNamed:@"chevron.right" withConfiguration:configuration]];
-        [[self chevronImageView] setTintColor:[UIColor tertiaryLabelColor]];
-        [[self chevronImageView] setContentMode:UIViewContentModeCenter];
-        [self addSubview:[self chevronImageView]];
-
         UIView *contentView = [self contentView];
         [[self titleLabel] setTranslatesAutoresizingMaskIntoConstraints:NO];
-        [[self chevronImageView] setTranslatesAutoresizingMaskIntoConstraints:NO];
         [NSLayoutConstraint activateConstraints:@[
             [[[self titleLabel] leadingAnchor] constraintEqualToAnchor:[contentView leadingAnchor]
                                                              constant:kKayokoScriptListCellHorizontalInset],
-            [[[self titleLabel] centerYAnchor] constraintEqualToAnchor:[contentView centerYAnchor]],
-            [[[self titleLabel] trailingAnchor]
-                constraintLessThanOrEqualToAnchor:[[self chevronImageView] leadingAnchor]
-                                        constant:-8],
-            [[[self chevronImageView] trailingAnchor] constraintEqualToAnchor:[contentView trailingAnchor]
-                                                                    constant:-kKayokoScriptListCellChevronTrailingInset],
-            [[[self chevronImageView] centerYAnchor] constraintEqualToAnchor:[contentView centerYAnchor]]
+            [[[self titleLabel] trailingAnchor] constraintEqualToAnchor:[contentView trailingAnchor]
+                                                               constant:-kKayokoScriptListCellHorizontalInset],
+            [[[self titleLabel] centerYAnchor] constraintEqualToAnchor:[contentView centerYAnchor]]
         ]];
 
         [self setAccessoryType:UITableViewCellAccessoryNone];
@@ -79,18 +64,16 @@ NS_ASSUME_NONNULL_END
     return self;
 }
 
-- (void)updateWithTitle:(NSString *)title showsChevron:(BOOL)showsChevron truncatesInMiddle:(BOOL)truncatesInMiddle {
+- (void)updateWithTitle:(NSString *)title truncatesInMiddle:(BOOL)truncatesInMiddle {
     [[self titleLabel] setText:title];
     [[self titleLabel] setLineBreakMode:(truncatesInMiddle ? NSLineBreakByTruncatingMiddle
                                                           : NSLineBreakByTruncatingTail)];
-    [[self chevronImageView] setHidden:!showsChevron];
 }
 
 - (void)prepareForReuse {
     [super prepareForReuse];
 
     [[self titleLabel] setText:nil];
-    [[self chevronImageView] setHidden:NO];
 }
 
 @end

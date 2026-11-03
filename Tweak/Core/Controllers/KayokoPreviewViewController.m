@@ -103,7 +103,7 @@ NS_ASSUME_NONNULL_END
     // Same slot as the word selection panel uses, so the entry keeps one position across both panels.
     UIButton *scriptButton = [headerView scriptButton];
     [headerView updateStyleForButton:scriptButton
-                       withImageName:@"wand.and.stars"
+                       withImageName:@"terminal"
                            imageSize:kKayokoBackButtonImageSize
                            tintColor:[UIColor labelColor]];
     [scriptButton setAccessibilityLabel:[[KayokoPasteboardManager localizationBundle]
