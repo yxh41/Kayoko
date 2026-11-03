@@ -8,6 +8,7 @@
 #import "KayokoKeyboardAvoidanceCoordinator.h"
 #import "KayokoScript.h"
 #import "KayokoScriptEditorViewController.h"
+#import "KayokoScriptSourceViewController.h"
 #import "KayokoScriptStore.h"
 
 #import <UIKit/UIKit.h>
@@ -91,6 +92,10 @@ static NSString *const kKayokoScriptsListCellReuseIdentifier = @"KayokoScriptsLi
 
     _keyboardAvoidanceCoordinator = [[KayokoKeyboardAvoidanceCoordinator alloc] initWithView:[self view]
                                                                                  scrollView:_tableView];
+
+    UILongPressGestureRecognizer *longPress =
+        [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleLongPress:)];
+    [[self tableView] addGestureRecognizer:longPress];
 }
 
 #pragma mark - Data
@@ -271,6 +276,33 @@ static NSString *const kKayokoScriptsListCellReuseIdentifier = @"KayokoScriptsLi
                                              }];
     UINavigationController *navigationController =
         [[UINavigationController alloc] initWithRootViewController:editor];
+    [self presentViewController:navigationController animated:YES completion:nil];
+}
+
+- (void)handleLongPress:(UILongPressGestureRecognizer *)gesture {
+    if ([gesture state] != UIGestureRecognizerStateBegan) {
+        return;
+    }
+    if ([self isEditing]) {
+        return;
+    }
+
+    CGPoint point = [gesture locationInView:[self tableView]];
+    NSIndexPath *indexPath = [[self tableView] indexPathForRowAtPoint:point];
+    if (!indexPath || (NSUInteger)[indexPath row] >= [[self scripts] count]) {
+        return;
+    }
+
+    KayokoScript *script = [[self scripts] objectAtIndex:(NSUInteger)[indexPath row]];
+    [self presentSourceForScript:script];
+}
+
+- (void)presentSourceForScript:(KayokoScript *)script {
+    KayokoScriptSourceViewController *sourceViewController =
+        [[KayokoScriptSourceViewController alloc] initWithScript:script
+                                              localizationBundle:[self localizationBundle]];
+    UINavigationController *navigationController =
+        [[UINavigationController alloc] initWithRootViewController:sourceViewController];
     [self presentViewController:navigationController animated:YES completion:nil];
 }
 

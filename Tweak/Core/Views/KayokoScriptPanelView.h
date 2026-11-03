@@ -17,6 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, strong, readonly) KayokoHeaderView *headerView;
 @property(nonatomic, strong, readonly) UIView *transitionContentView;
 @property(nonatomic, strong, readonly) UITableView *tableView;
+@property(nonatomic, strong, readonly) UISearchBar *searchBar;
 @property(nonatomic, strong, readonly) UIView *resultView;
 @property(nonatomic, strong, readonly) KayokoEdgeFadingTextView *resultTextView;
 @property(nonatomic, strong, readonly) UILabel *resultCountLabel;
@@ -26,6 +27,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)setTitleText:(NSString *)title;
 - (void)showList;
+- (void)setSearchBarVisible:(BOOL)visible;
 - (void)showResultWithText:(NSString *)text countText:(nullable NSString *)countText;
 /// The failure page reuses the result layout: the text is a diagnostic, and the only thing worth offering on a
 /// failed run is the ability to copy it somewhere the user can act on it.

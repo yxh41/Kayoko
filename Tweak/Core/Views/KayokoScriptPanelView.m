@@ -34,6 +34,9 @@ static NSString *KayokoScriptPanelLocalizedString(NSString *key, NSString *fallb
 @property(nonatomic, strong, readwrite) UIButton *resultCopyButton;
 @property(nonatomic, strong, readwrite) UIButton *resultPasteButton;
 @property(nonatomic, strong, readwrite) UILabel *noticeLabel;
+@property(nonatomic, strong, readwrite) UISearchBar *searchBar;
+/// Drives the search bar's height: collapsing it to zero removes the bar from the layout without animation churn.
+@property(nonatomic, strong) NSLayoutConstraint *searchBarHeightConstraint;
 @property(nonatomic, strong) UIStackView *footerStackView;
 /// What the copy button says when the page is a real result rather than a failure report.
 @property(nonatomic, copy) NSString *defaultCopyTitle;
@@ -60,6 +63,17 @@ NS_ASSUME_NONNULL_END
         [[_headerView alternateTrailingButton] setHidden:YES];
         [[_headerView scriptButton] setHidden:YES];
         [self addSubview:_headerView];
+
+        // Search lives directly under the header (not in the sliding container) so it stays put while the list
+        // scrolls beneath it; it is collapsed out of the layout unless the panel controller asks for it.
+        _searchBar = [[UISearchBar alloc] init];
+        [_searchBar setPlaceholder:KayokoScriptPanelLocalizedString(@"Search", @"Search")];
+        [_searchBar setSearchBarStyle:UISearchBarStyleMinimal];
+        [_searchBar setTranslucent:NO];
+        [_searchBar setBackgroundColor:[UIColor clearColor]];
+        [_searchBar setBarTintColor:[UIColor clearColor]];
+        [_searchBar setHidden:YES];
+        [self addSubview:_searchBar];
 
         // The header has to stay put while content slides, so everything else lives in its own container.
         _transitionContentView = [[UIView alloc] init];
@@ -129,6 +143,7 @@ NS_ASSUME_NONNULL_END
         [_resultView addSubview:footerStackView];
 
         [self activateConstraints];
+        [self setSearchBarVisible:NO];
         [self showList];
     }
 
@@ -157,13 +172,18 @@ NS_ASSUME_NONNULL_END
     UIView *resultView = [self resultView];
     UIView *resultTextView = [self resultTextView];
     UIStackView *footerStackView = [self footerStackView];
+    UIView *searchBar = [self searchBar];
     UILayoutGuide *safeArea = [self safeAreaLayoutGuide];
 
     for (UIView *view in @[
-             headerView, transitionContentView, tableView, noticeLabel, resultView, resultTextView, footerStackView
+             headerView, transitionContentView, tableView, noticeLabel, resultView, resultTextView, footerStackView,
+             searchBar
          ]) {
         [view setTranslatesAutoresizingMaskIntoConstraints:NO];
     }
+
+    NSLayoutConstraint *searchBarHeight = [[searchBar heightAnchor] constraintEqualToConstant:0];
+    [self setSearchBarHeightConstraint:searchBarHeight];
 
     [NSLayoutConstraint activateConstraints:@[
         [[headerView topAnchor] constraintEqualToAnchor:[self topAnchor]],
@@ -171,12 +191,17 @@ NS_ASSUME_NONNULL_END
         [[headerView trailingAnchor] constraintEqualToAnchor:[self trailingAnchor]],
         [[headerView heightAnchor] constraintEqualToConstant:[KayokoHeaderView preferredHeight]],
 
-        [[transitionContentView topAnchor] constraintEqualToAnchor:[headerView bottomAnchor]],
+        [[searchBar topAnchor] constraintEqualToAnchor:[headerView bottomAnchor]],
+        [[searchBar leadingAnchor] constraintEqualToAnchor:[safeArea leadingAnchor]],
+        [[searchBar trailingAnchor] constraintEqualToAnchor:[safeArea trailingAnchor]],
+        searchBarHeight,
+
+        [[transitionContentView topAnchor] constraintEqualToAnchor:[searchBar bottomAnchor]],
         [[transitionContentView leadingAnchor] constraintEqualToAnchor:[self leadingAnchor]],
         [[transitionContentView trailingAnchor] constraintEqualToAnchor:[self trailingAnchor]],
         [[transitionContentView bottomAnchor] constraintEqualToAnchor:[self bottomAnchor]],
 
-        [[tableView topAnchor] constraintEqualToAnchor:[transitionContentView topAnchor]],
+        [[tableView topAnchor] constraintEqualToAnchor:[searchBar bottomAnchor]],
         [[tableView leadingAnchor] constraintEqualToAnchor:[safeArea leadingAnchor]],
         [[tableView trailingAnchor] constraintEqualToAnchor:[safeArea trailingAnchor]],
         [[tableView bottomAnchor] constraintEqualToAnchor:[safeArea bottomAnchor]],
@@ -212,6 +237,12 @@ NS_ASSUME_NONNULL_END
 
 - (void)setTitleText:(NSString *)title {
     [[self headerView] setTitleText:title];
+}
+
+- (void)setSearchBarVisible:(BOOL)visible {
+    [[self searchBarHeightConstraint] setConstant:visible ? 44.0 : 0.0];
+    [[self searchBar] setHidden:!visible];
+    [self layoutIfNeeded];
 }
 
 - (void)showList {

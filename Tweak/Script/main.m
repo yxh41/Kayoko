@@ -229,6 +229,9 @@ static NSString *kayokoDescribeType(JSValue *value) {
 }
 
 static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value,
+                                                  NSUInteger maxResults,
+                                                  NSUInteger maxResultLength,
+                                                  NSUInteger maxTotalLength,
                                                   NSString **errorCode,
                                                   NSString **errorMessage,
                                                   NSDictionary<NSString *, id> **errorExtra) {
@@ -241,13 +244,13 @@ static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value,
         if ([text length] == 0) {
             return @[];
         }
-        if ([text length] > kKayokoScriptMaximumResultLength) {
+        if ([text length] > maxResultLength) {
             *errorCode = @"result-too-large";
             *errorMessage = @"Result is too large";
             *errorExtra = @{
                 @"stage" : @"run",
                 @"length" : @([text length]),
-                @"limit" : @(kKayokoScriptMaximumResultLength),
+                @"limit" : @(maxResultLength),
             };
             return nil;
         }
@@ -263,17 +266,17 @@ static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value,
 
     JSValue *lengthValue = [value valueForProperty:@"length"];
     NSUInteger length = [lengthValue isUndefined] ? 0 : [lengthValue toUInt32];
-    NSMutableArray<NSString *> *results = [NSMutableArray arrayWithCapacity:MIN(length, kKayokoScriptMaximumResults)];
+    NSMutableArray<NSString *> *results = [NSMutableArray arrayWithCapacity:MIN(length, maxResults)];
     NSUInteger totalLength = 0;
 
     for (NSUInteger index = 0; index < length; index++) {
-        if ([results count] >= kKayokoScriptMaximumResults) {
+        if ([results count] >= maxResults) {
             *errorCode = @"too-many-results";
             *errorMessage = @"Too many results";
             *errorExtra = @{
                 @"stage" : @"run",
                 @"count" : @([results count]),
-                @"limit" : @(kKayokoScriptMaximumResults),
+                @"limit" : @(maxResults),
             };
             return nil;
         }
@@ -294,26 +297,26 @@ static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value,
         if ([text length] == 0) {
             continue;
         }
-        if ([text length] > kKayokoScriptMaximumResultLength) {
+        if ([text length] > maxResultLength) {
             *errorCode = @"result-too-large";
             *errorMessage = @"Result is too large";
             *errorExtra = @{
                 @"stage" : @"run",
                 @"index" : @(index + 1),
                 @"length" : @([text length]),
-                @"limit" : @(kKayokoScriptMaximumResultLength),
+                @"limit" : @(maxResultLength),
             };
             return nil;
         }
 
         totalLength += [text length];
-        if (totalLength > kKayokoScriptMaximumTotalLength) {
+        if (totalLength > maxTotalLength) {
             *errorCode = @"result-too-large";
             *errorMessage = @"Too much text in total";
             *errorExtra = @{
                 @"stage" : @"run",
                 @"length" : @(totalLength),
-                @"limit" : @(kKayokoScriptMaximumTotalLength),
+                @"limit" : @(maxTotalLength),
             };
             return nil;
         }
@@ -324,8 +327,43 @@ static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value,
     return results;
 }
 
+/// Reads the optional `limits` block of the request and clamps every value into a safe range, so a malformed or
+/// hostile request can never raise a limit past what the watchdog and pipes can actually honour.
+static void kayokoParseLimits(NSDictionary *request,
+                              NSUInteger *maxResults,
+                              NSUInteger *maxResultLength,
+                              NSUInteger *maxTotalLength) {
+    *maxResults = kKayokoScriptMaximumResults;
+    *maxResultLength = kKayokoScriptMaximumResultLength;
+    *maxTotalLength = kKayokoScriptMaximumTotalLength;
+
+    id rawLimits = [request objectForKey:@"limits"];
+    if (![rawLimits isKindOfClass:[NSDictionary class]]) {
+        return;
+    }
+
+    NSDictionary *limits = (NSDictionary *)rawLimits;
+
+    id rawResults = [limits objectForKey:@"maxResults"];
+    if ([rawResults isKindOfClass:[NSNumber class]]) {
+        NSUInteger value = [rawResults unsignedIntegerValue];
+        *maxResults = MIN(MAX(value, 1), 2000);
+    }
+
+    id rawLength = [limits objectForKey:@"maxResultLength"];
+    if ([rawLength isKindOfClass:[NSNumber class]]) {
+        NSUInteger value = [rawLength unsignedIntegerValue];
+        *maxResultLength = MIN(MAX(value, 1000), 500000);
+    }
+
+    *maxTotalLength = MIN(*maxResultLength * 4, 2000000);
+}
+
 static NSArray<NSString *> *kayokoRunScript(NSString *code,
                                             NSString *input,
+                                            NSUInteger maxResults,
+                                            NSUInteger maxResultLength,
+                                            NSUInteger maxTotalLength,
                                             NSString **errorCode,
                                             NSString **errorMessage,
                                             NSDictionary<NSString *, id> **errorExtra) {
@@ -374,7 +412,7 @@ static NSArray<NSString *> *kayokoRunScript(NSString *code,
         return nil;
     }
 
-    return kayokoNormalizeResult(value, errorCode, errorMessage, errorExtra);
+    return kayokoNormalizeResult(value, maxResults, maxResultLength, maxTotalLength, errorCode, errorMessage, errorExtra);
 }
 
 #pragma mark - Entry Point
@@ -428,6 +466,11 @@ int main(int argc, char *argv[]) {
             text = @"";
         }
 
+        NSUInteger maxResults = 0;
+        NSUInteger maxResultLength = 0;
+        NSUInteger maxTotalLength = 0;
+        kayokoParseLimits(request, &maxResults, &maxResultLength, &maxTotalLength);
+
         pthread_t watchdog = (pthread_t)0;
         if (pthread_create(&watchdog, NULL, kayokoWatchdogMain, &timeout) == 0) {
             pthread_detach(watchdog);
@@ -436,7 +479,8 @@ int main(int argc, char *argv[]) {
         NSString *errorCode = nil;
         NSString *errorMessage = nil;
         NSDictionary<NSString *, id> *errorExtra = nil;
-        NSArray<NSString *> *results = kayokoRunScript(code, text, &errorCode, &errorMessage, &errorExtra);
+        NSArray<NSString *> *results = kayokoRunScript(code, text, maxResults, maxResultLength, maxTotalLength,
+                                                      &errorCode, &errorMessage, &errorExtra);
         if (!results) {
             kayokoEmitError(errorCode, errorMessage, errorExtra);
             return 1;

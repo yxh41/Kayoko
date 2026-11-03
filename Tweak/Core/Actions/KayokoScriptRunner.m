@@ -7,6 +7,7 @@
 
 #import "KayokoScript.h"
 #import "KayokoScriptFailure.h"
+#import "KayokoScriptLimits.h"
 
 #import <errno.h>
 #import <fcntl.h>
@@ -20,7 +21,6 @@
 
 static NSString *const kKayokoScriptExecutorName = @"kayoko_script";
 static NSTimeInterval const kKayokoScriptRunnerTimeout = 6.0;
-static NSTimeInterval const kKayokoScriptRunnerExecutorTimeout = 5.0;
 static NSUInteger const kKayokoScriptRunnerMaximumOutputBytes = 4 * 1024 * 1024;
 /// console.log is a debug aid, not a result: keep the tail of it and drop the rest rather than let a chatty
 /// script fill memory (or block on a full pipe once this side stops reading).
@@ -117,9 +117,15 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
         return;
     }
 
+    KayokoScriptLimits *limits = [KayokoScriptLimits loadLimits];
+    NSDictionary *limitsDictionary = @{
+        @"maxResults" : @([limits maxResults]),
+        @"maxResultLength" : @([limits maxResultLength]),
+    };
     NSDictionary *request = @{
         @"code" : [script code] ?: @"",
         @"input" : input ?: @"",
+        @"limits" : limitsDictionary,
     };
     NSData *requestData = [NSJSONSerialization dataWithJSONObject:request options:0 error:NULL];
     if ([requestData length] == 0) {
@@ -132,7 +138,11 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
       NSArray<NSString *> *results = nil;
       KayokoScriptFailure *failure = nil;
-      [self executeAtPath:executorPath requestData:requestData results:&results failure:&failure];
+      [self executeAtPath:executorPath
+              requestData:requestData
+          executorTimeout:[limits timeout]
+                  results:&results
+                  failure:&failure];
 
       dispatch_async(dispatch_get_main_queue(), ^{
         completion(results, failure);
@@ -144,6 +154,7 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
 
 - (void)executeAtPath:(NSString *)executorPath
           requestData:(NSData *)requestData
+      executorTimeout:(NSTimeInterval)executorTimeout
               results:(NSArray<NSString *> **)results
               failure:(KayokoScriptFailure **)failure {
     int stdinPipe[2] = {-1, -1};
@@ -172,7 +183,7 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
     posix_spawnattr_init(&attributes);
     posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
 
-    NSString *timeoutArgument = [NSString stringWithFormat:@"%.1f", kKayokoScriptRunnerExecutorTimeout];
+    NSString *timeoutArgument = [NSString stringWithFormat:@"%.1f", executorTimeout];
     char *argv[] = {
         (char *)[executorPath fileSystemRepresentation],
         (char *)"-t",

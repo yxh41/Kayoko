@@ -67,6 +67,7 @@
 "Script timed out" = "Script timed out";
 "Scripts" = "Scripts";
 "Search" = "Search";
+"Script Source" = "Script Source";
 "Selection Order" = "Selection Order";
 "Spotlight" = "Spotlight";
 "SpringBoard" = "SpringBoard";
@@ -138,3 +139,9 @@
 "Input" = "Input";
 "Output" = "Output";
 "Error" = "Error";
+"Run Limits" = "Run Limits";
+"Run Limits Footer" = "These limits keep a script from hanging the process or using too much memory. Changes take effect immediately.";
+"Timeout (seconds)" = "Timeout (seconds)";
+"Maximum results" = "Maximum results";
+"Maximum length per result" = "Maximum length per result";
+"Could Not Save Limits" = "Could Not Save Limits";

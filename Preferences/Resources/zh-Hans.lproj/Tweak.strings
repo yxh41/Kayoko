@@ -67,6 +67,7 @@
 "Script timed out" = "脚本运行超时";
 "Scripts" = "脚本";
 "Search" = "搜索";
+"Script Source" = "脚本源码";
 "Selection Order" = "选中顺序";
 "Spotlight" = "聚焦";
 "SpringBoard" = "主屏幕";
@@ -138,3 +139,9 @@
 "Input" = "输入";
 "Output" = "输出";
 "Error" = "错误";
+"Run Limits" = "运行限制";
+"Run Limits Footer" = "这些限制防止脚本卡死进程或占用过多内存。修改后立即生效，无需重启。";
+"Timeout (seconds)" = "超时（秒）";
+"Maximum results" = "最大结果条数";
+"Maximum length per result" = "单条结果最大字数";
+"Could Not Save Limits" = "无法保存限制";

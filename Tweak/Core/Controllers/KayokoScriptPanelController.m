@@ -30,7 +30,7 @@ static NSString *KayokoScriptPanelLocalized(NSString *key, NSString *fallback) {
     return [[KayokoPasteboardManager localizationBundle] localizedStringForKey:key value:fallback table:@"Tweak"];
 }
 
-@interface KayokoScriptPanelController () <UITableViewDataSource, UITableViewDelegate>
+@interface KayokoScriptPanelController () <UITableViewDataSource, UITableViewDelegate, UISearchBarDelegate>
 
 @property(nonatomic, strong, readwrite) KayokoScriptPanelView *panelView;
 @property(nonatomic, strong) KayokoScriptStore *scriptStore;
@@ -38,6 +38,8 @@ static NSString *KayokoScriptPanelLocalized(NSString *key, NSString *fallback) {
 
 @property(nonatomic, copy) NSString *inputText;
 @property(nonatomic, copy) NSArray<KayokoScript *> *scripts;
+/// What the list actually shows; a subset of `scripts` while a search query is active, equal to it otherwise.
+@property(nonatomic, copy) NSArray<KayokoScript *> *filteredScripts;
 @property(nonatomic, copy) NSArray<NSString *> *values;
 @property(nonatomic, copy, nullable) NSString *resultText;
 @property(nonatomic, strong, nullable) KayokoScript *activeScript;
@@ -76,6 +78,7 @@ NS_ASSUME_NONNULL_END
                            forControlEvents:UIControlEventTouchUpInside];
         [[_panelView tableView] setDataSource:self];
         [[_panelView tableView] setDelegate:self];
+        [[_panelView searchBar] setDelegate:self];
     }
 
     return self;
@@ -93,6 +96,8 @@ NS_ASSUME_NONNULL_END
 
     [[self scriptStore] reload];
     [self setScripts:[[self scriptStore] enabledScripts]];
+    [self setFilteredScripts:[self scripts]];
+    [[[self panelView] searchBar] setText:@""];
     [self showListState];
     [self updateTableInteraction];
 }
@@ -105,6 +110,7 @@ NS_ASSUME_NONNULL_END
     [self setResultText:nil];
     [self setRunning:NO];
     [self setScripts:@[]];
+    [self setFilteredScripts:@[]];
     [self showListState];
     [self updateTableInteraction];
 }
@@ -113,6 +119,10 @@ NS_ASSUME_NONNULL_END
 
 - (void)showListState {
     [self setState:KayokoScriptPanelStateList];
+    [self setFilteredScripts:[self scripts]];
+    [[[self panelView] searchBar] setText:@""];
+    [[[self panelView] searchBar] resignFirstResponder];
+    [[self panelView] setSearchBarVisible:([[self scripts] count] > 0)];
     [[self panelView] setTitleText:KayokoScriptPanelLocalized(@"Scripts", @"Scripts")];
     [[self panelView] showList];
     if ([[self scripts] count] == 0) {
@@ -122,12 +132,16 @@ NS_ASSUME_NONNULL_END
 
 - (void)showChoicesState {
     [self setState:KayokoScriptPanelStateChoices];
+    [[[self panelView] searchBar] resignFirstResponder];
+    [[self panelView] setSearchBarVisible:NO];
     [[self panelView] setTitleText:[self activeScriptTitle]];
     [[self panelView] showList];
 }
 
 - (void)showResultStateWithText:(NSString *)text {
     [self setState:KayokoScriptPanelStateResult];
+    [[[self panelView] searchBar] resignFirstResponder];
+    [[self panelView] setSearchBarVisible:NO];
     [self setResultText:text];
 
     NSString *format = KayokoScriptPanelLocalized(@"%lu characters", @"%lu characters");
@@ -207,6 +221,8 @@ NS_ASSUME_NONNULL_END
 
 - (void)showFailureStateWithFailure:(KayokoScriptFailure *)failure {
     [self setState:KayokoScriptPanelStateFailure];
+    [[[self panelView] searchBar] resignFirstResponder];
+    [[self panelView] setSearchBarVisible:NO];
     [[self panelView] setTitleText:[self activeScriptTitle]];
     NSString *report = [self reportForFailure:failure];
     // The failure page hides the paste button, so stashing the report here is enough to make the copy button work.
@@ -403,10 +419,10 @@ NS_ASSUME_NONNULL_END
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     if ([self state] == KayokoScriptPanelStateList) {
-        return [[self scripts] count];
+        return (NSInteger)[[self filteredScripts] count];
     }
 
-    return [[self values] count];
+    return (NSInteger)[[self values] count];
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
@@ -417,7 +433,7 @@ NS_ASSUME_NONNULL_END
     }
 
     if ([self state] == KayokoScriptPanelStateList) {
-        KayokoScript *script = [[self scripts] objectAtIndex:(NSUInteger)[indexPath row]];
+        KayokoScript *script = [[self filteredScripts] objectAtIndex:(NSUInteger)[indexPath row]];
         [cell updateWithTitle:[script displayName] truncatesInMiddle:NO];
     } else {
         NSString *value = [[self values] objectAtIndex:(NSUInteger)[indexPath row]];
@@ -434,8 +450,8 @@ NS_ASSUME_NONNULL_END
 
     NSUInteger row = (NSUInteger)[indexPath row];
     if ([self state] == KayokoScriptPanelStateList) {
-        if (row < [[self scripts] count]) {
-            [self runScript:[[self scripts] objectAtIndex:row]];
+        if (row < [[self filteredScripts] count]) {
+            [self runScript:[[self filteredScripts] objectAtIndex:row]];
         }
         return;
     }
@@ -446,6 +462,50 @@ NS_ASSUME_NONNULL_END
             [self hapticFeedbackHandler](UIImpactFeedbackStyleLight);
         }
     }
+}
+
+#pragma mark - UISearchBarDelegate
+
+- (void)searchBarTextDidBeginEditing:(UISearchBar *)searchBar {
+    [searchBar setShowsCancelButton:YES animated:YES];
+}
+
+- (void)searchBarTextDidEndEditing:(UISearchBar *)searchBar {
+    [searchBar setShowsCancelButton:NO animated:YES];
+}
+
+- (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
+    [self applyScriptFilter:searchText];
+}
+
+- (void)searchBarSearchButtonClicked:(UISearchBar *)searchBar {
+    [searchBar resignFirstResponder];
+}
+
+- (void)searchBarCancelButtonClicked:(UISearchBar *)searchBar {
+    [searchBar setText:@""];
+    [self applyScriptFilter:@""];
+    [searchBar resignFirstResponder];
+}
+
+/// An empty query restores the full list; otherwise every script whose name contains the text (case-insensitive)
+/// stays. The table is reloaded in place, so the scroll offset and the rest position are both preserved.
+- (void)applyScriptFilter:(NSString *)query {
+    NSString *trimmed =
+        [query stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([trimmed length] == 0) {
+        [self setFilteredScripts:[self scripts]];
+    } else {
+        NSMutableArray<KayokoScript *> *filtered = [NSMutableArray array];
+        for (KayokoScript *script in [self scripts]) {
+            if ([[[script displayName] rangeOfString:trimmed
+                                             options:NSCaseInsensitiveSearch] location] != NSNotFound) {
+                [filtered addObject:script];
+            }
+        }
+        [self setFilteredScripts:filtered];
+    }
+    [[[self panelView] tableView] reloadData];
 }
 
 @end
