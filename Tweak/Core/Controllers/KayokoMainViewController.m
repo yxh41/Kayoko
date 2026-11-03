@@ -1948,9 +1948,7 @@ NS_ASSUME_NONNULL_END
                    transitioningView:sourceTransitionView
                            direction:KayokoContentTransitionDirectionForward
                  alongsideAnimations:nil
-                          completion:^{
-                            [scriptPanelView finishListPresentation];
-                          }];
+                          completion:nil];
     [[self panelPresentationController] triggerHapticFeedbackWithStyle:UIImpactFeedbackStyleMedium];
 }
 

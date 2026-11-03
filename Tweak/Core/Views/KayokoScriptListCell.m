@@ -47,21 +47,24 @@ NS_ASSUME_NONNULL_END
         [[self titleLabel] setNumberOfLines:1];
         [self addSubview:[self titleLabel]];
 
-        UIView *contentView = [self contentView];
-        [[self titleLabel] setTranslatesAutoresizingMaskIntoConstraints:NO];
-        [NSLayoutConstraint activateConstraints:@[
-            [[[self titleLabel] leadingAnchor] constraintEqualToAnchor:[contentView leadingAnchor]
-                                                             constant:kKayokoScriptListCellHorizontalInset],
-            [[[self titleLabel] trailingAnchor] constraintEqualToAnchor:[contentView trailingAnchor]
-                                                               constant:-kKayokoScriptListCellHorizontalInset],
-            [[[self titleLabel] centerYAnchor] constraintEqualToAnchor:[contentView centerYAnchor]]
-        ]];
-
         [self setAccessoryType:UITableViewCellAccessoryNone];
         [self setSelectionStyle:UITableViewCellSelectionStyleDefault];
     }
 
     return self;
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    // Frame-based on purpose. The label lives on the cell while the row height comes from the table, and a
+    // layout on the cell is not guaranteed to re-solve a constraint that reaches across into the content view:
+    // pinning the title to -[UITableView contentView].centerY left it at the top edge of the cell, half a row
+    // above the row the touch actually landed on. Bounds of the cell are always correct here.
+    CGRect bounds = [self bounds];
+    CGFloat width = CGRectGetWidth(bounds) - 2 * kKayokoScriptListCellHorizontalInset;
+    [[self titleLabel] setFrame:CGRectMake(kKayokoScriptListCellHorizontalInset, 0, MAX(width, 0),
+                                           CGRectGetHeight(bounds))];
 }
 
 - (void)updateWithTitle:(NSString *)title truncatesInMiddle:(BOOL)truncatesInMiddle {
