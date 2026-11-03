@@ -44,10 +44,13 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    // PreferenceLoader instantiates this page with -init, so the bundle is not handed in; derive it from the
-    // class the same way the other settings pages do.
+    // PreferenceLoader instantiates this page with -init, so neither the bundle nor the limits are handed in;
+    // resolve both here so every entry path (init, or the bundle convenience initializer) starts populated.
     if (![self localizationBundle]) {
         [self setLocalizationBundle:[NSBundle bundleForClass:[self class]] ?: [NSBundle mainBundle]];
+    }
+    if (![self limits]) {
+        [self setLimits:[KayokoScriptLimits loadLimits]];
     }
 
     [self setTitle:[self localizedStringForKey:@"Run Limits"]];
@@ -78,6 +81,8 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
         return [NSString stringWithFormat:@"%lu", (unsigned long)[self limits].maxResults];
     case KayokoScriptLimitsRowLength:
         return [NSString stringWithFormat:@"%lu", (unsigned long)[self limits].maxResultLength];
+    default:
+        break;
     }
     return @"";
 }
@@ -115,19 +120,21 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
         [stepper setMinimumValue:1];
         [stepper setMaximumValue:30];
         [stepper setStepValue:1];
-        [stepper setDoubleValue:[self limits].timeout];
+        [stepper setValue:[self limits].timeout];
         break;
     case KayokoScriptLimitsRowResults:
         [stepper setMinimumValue:1];
         [stepper setMaximumValue:2000];
         [stepper setStepValue:10];
-        [stepper setDoubleValue:[self limits].maxResults];
+        [stepper setValue:[self limits].maxResults];
         break;
     case KayokoScriptLimitsRowLength:
         [stepper setMinimumValue:1000];
         [stepper setMaximumValue:500000];
         [stepper setStepValue:1000];
-        [stepper setDoubleValue:[self limits].maxResultLength];
+        [stepper setValue:[self limits].maxResultLength];
+        break;
+    default:
         break;
     }
 
@@ -164,6 +171,8 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
         return [self localizedStringForKey:@"Maximum results"];
     case KayokoScriptLimitsRowLength:
         return [self localizedStringForKey:@"Maximum length per result"];
+    default:
+        break;
     }
     return @"";
 }
@@ -173,13 +182,15 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
 - (void)stepperChanged:(UIStepper *)stepper {
     switch ((KayokoScriptLimitsRow)[stepper tag]) {
     case KayokoScriptLimitsRowTimeout:
-        [[self limits] setTimeout:[stepper doubleValue]];
+        [[self limits] setTimeout:[stepper value]];
         break;
     case KayokoScriptLimitsRowResults:
-        [[self limits] setMaxResults:(NSUInteger)[stepper doubleValue]];
+        [[self limits] setMaxResults:(NSUInteger)[stepper value]];
         break;
     case KayokoScriptLimitsRowLength:
-        [[self limits] setMaxResultLength:(NSUInteger)[stepper doubleValue]];
+        [[self limits] setMaxResultLength:(NSUInteger)[stepper value]];
+        break;
+    default:
         break;
     }
 
