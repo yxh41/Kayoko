@@ -21,7 +21,6 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
 @property(nonatomic, strong) KayokoScriptLimits *limits;
 @property(nonatomic, strong) UITableView *tableView;
 @property(nonatomic, strong) NSBundle *localizationBundle;
-@property(nonatomic, strong) NSArray<UILabel *> *valueLabels;
 
 @end
 
@@ -45,6 +44,12 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
 - (void)viewDidLoad {
     [super viewDidLoad];
 
+    // PreferenceLoader instantiates this page with -init, so the bundle is not handed in; derive it from the
+    // class the same way the other settings pages do.
+    if (![self localizationBundle]) {
+        [self setLocalizationBundle:[NSBundle bundleForClass:[self class]] ?: [NSBundle mainBundle]];
+    }
+
     [self setTitle:[self localizedStringForKey:@"Run Limits"]];
 
     _tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStyleInsetGrouped];
@@ -59,25 +64,22 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
         [[_tableView trailingAnchor] constraintEqualToAnchor:[[self view] trailingAnchor]],
         [[_tableView bottomAnchor] constraintEqualToAnchor:[[self view] bottomAnchor]]
     ]];
-
-    NSMutableArray<UILabel *> *valueLabels = [NSMutableArray arrayWithCapacity:KayokoScriptLimitsRowCount];
-    for (NSInteger index = 0; index < KayokoScriptLimitsRowCount; index++) {
-        UILabel *label = [[UILabel alloc] init];
-        [label setFont:[UIFont systemFontOfSize:15 weight:UIFontWeightMedium]];
-        [label setTextColor:[UIColor labelColor]];
-        [label setTextAlignment:NSTextAlignmentRight];
-        [valueLabels addObject:label];
-    }
-    [self setValueLabels:valueLabels];
-    [self refreshValueLabels];
 }
 
-#pragma mark - Value Labels
+#pragma mark - Values
 
-- (void)refreshValueLabels {
-    [[self valueLabels][KayokoScriptLimitsRowTimeout] setText:[NSString stringWithFormat:@"%.0f s", [self limits].timeout]];
-    [[self valueLabels][KayokoScriptLimitsRowResults] setText:[NSString stringWithFormat:@"%lu", (unsigned long)[self limits].maxResults]];
-    [[self valueLabels][KayokoScriptLimitsRowLength] setText:[NSString stringWithFormat:@"%lu", (unsigned long)[self limits].maxResultLength]];
+/// The stepper and the row label both read from the same limits object, so the value text is derived on demand
+/// rather than kept in a label that a reused cell would otherwise pin to the wrong row.
+- (NSString *)valueTextForRow:(KayokoScriptLimitsRow)row {
+    switch (row) {
+    case KayokoScriptLimitsRowTimeout:
+        return [NSString stringWithFormat:@"%.0f s", [self limits].timeout];
+    case KayokoScriptLimitsRowResults:
+        return [NSString stringWithFormat:@"%lu", (unsigned long)[self limits].maxResults];
+    case KayokoScriptLimitsRowLength:
+        return [NSString stringWithFormat:@"%lu", (unsigned long)[self limits].maxResultLength];
+    }
+    return @"";
 }
 
 #pragma mark - UITableViewDataSource
@@ -133,9 +135,19 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
     [stepper addTarget:self action:@selector(stepperChanged:) forControlEvents:UIControlEventValueChanged];
     [cell setAccessoryView:stepper];
 
-    UILabel *valueLabel = [self valueLabels][(NSUInteger)[indexPath row]];
-    [[cell contentView] addSubview:valueLabel];
+    // A fresh label per cell avoids pinning a reused cell to a value label that belonged to another row.
+    UIView *existing = [[cell contentView] viewWithTag:101];
+    if (existing) {
+        [existing removeFromSuperview];
+    }
+    UILabel *valueLabel = [[UILabel alloc] init];
+    [valueLabel setTag:101];
+    [valueLabel setFont:[UIFont systemFontOfSize:15 weight:UIFontWeightMedium]];
+    [valueLabel setTextColor:[UIColor labelColor]];
+    [valueLabel setTextAlignment:NSTextAlignmentRight];
+    [valueLabel setText:[self valueTextForRow:(KayokoScriptLimitsRow)[indexPath row]]];
     [valueLabel setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [[cell contentView] addSubview:valueLabel];
     [NSLayoutConstraint activateConstraints:@[
         [[valueLabel centerYAnchor] constraintEqualToAnchor:[[cell contentView] centerYAnchor]],
         [[valueLabel leadingAnchor] constraintEqualToAnchor:[[cell textLabel] trailingAnchor] constant:8],
@@ -171,7 +183,7 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
         break;
     }
 
-    [self refreshValueLabels];
+    [[self tableView] reloadData];
 
     NSError *error = nil;
     if (![[self limits] saveLimits:&error]) {

@@ -498,8 +498,8 @@ NS_ASSUME_NONNULL_END
     } else {
         NSMutableArray<KayokoScript *> *filtered = [NSMutableArray array];
         for (KayokoScript *script in [self scripts]) {
-            if ([[[script displayName] rangeOfString:trimmed
-                                             options:NSCaseInsensitiveSearch] location] != NSNotFound) {
+            NSRange match = [[script displayName] rangeOfString:trimmed options:NSCaseInsensitiveSearch];
+            if (match.location != NSNotFound) {
                 [filtered addObject:script];
             }
         }
