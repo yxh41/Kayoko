@@ -135,7 +135,7 @@
 "Script Is Empty" = "脚本代码不能为空";
 "Untitled Script" = "未命名脚本";
 "Run Result" = "运行结果";
-"Script Footer Hint" = "定义 main(text)，返回字符串或字符串数组。";
+"Script Footer Hint" = "定义 main(text)，返回字符串、字符串数组，或 {type, title, content} 动作。";
 "Input" = "输入";
 "Output" = "输出";
 "Error" = "错误";
@@ -145,3 +145,11 @@
 "Maximum results" = "最大结果条数";
 "Maximum length per result" = "单条结果最大字数";
 "Could Not Save Limits" = "无法保存限制";
+"Open link" = "打开链接";
+"Open app" = "打开 App";
+"Open %@" = "打开 %@";
+"Unknown item type \"%@\"" = "未知的条目类型「%@」";
+"An item is missing its type" = "有条目缺少 type 字段";
+"Item %ld (%@) has no usable content" = "第 %ld 条（%@）没有可用内容";
+"An item has no usable content" = "有条目没有可用内容";
+"Cannot open a %@ link" = "无法打开 %@ 链接";

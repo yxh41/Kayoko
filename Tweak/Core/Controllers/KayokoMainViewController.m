@@ -39,6 +39,8 @@ static NSTimeInterval const kKayokoSearchInputExternalHideSuppressionDuration = 
 @interface LSApplicationWorkspace : NSObject
 + (instancetype)defaultWorkspace;
 - (BOOL)openSensitiveURL:(NSURL *)url withOptions:(NSDictionary *)options error:(NSError **)error;
+/// Not every iOS build answers this; callers have to fall back to a scheme launch.
+- (BOOL)openApplicationWithBundleID:(NSString *)bundleIdentifier;
 @end
 
 NS_ASSUME_NONNULL_BEGIN
@@ -116,6 +118,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) UIViewAnimationOptions noteEditingKeyboardAnimationOptions;
 
 - (void)restoreScriptSearchFrameAnimated:(BOOL)animated;
+
+#pragma mark - Script Actions
+
+- (void)openSensitiveURL:(NSURL *)URL;
+- (void)launchApplicationWithBundleIdentifier:(NSString *)bundleIdentifier;
 @end
 
 NS_ASSUME_NONNULL_END
@@ -2113,6 +2120,77 @@ NS_ASSUME_NONNULL_END
                                              allowsAutomaticPaste:YES];
     [[self panelPresentationController] prepareStandardDismissAnimation];
     [self hideAfterDirectPaste];
+}
+
+- (void)scriptPanelController:(KayokoScriptPanelController *)controller didRequestOpenURL:(NSString *)urlString {
+    (void)controller;
+    NSURL *URL = [NSURL URLWithString:urlString];
+    if (!URL) {
+        return;
+    }
+
+    // Dismiss before opening: switching apps under an animating panel leaves the next presentation without a
+    // window to land in.
+    [self hideWithStandardDismissAnimation];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      [self openSensitiveURL:URL];
+    });
+}
+
+- (void)scriptPanelController:(KayokoScriptPanelController *)controller
+    didRequestOpenApplication:(NSString *)bundleIdentifier {
+    (void)controller;
+    if ([bundleIdentifier length] == 0) {
+        return;
+    }
+
+    [self hideWithStandardDismissAnimation];
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      [self launchApplicationWithBundleIdentifier:bundleIdentifier];
+    });
+}
+
+#pragma mark - Script Actions
+
+- (void)openSensitiveURL:(NSURL *)URL {
+    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    if (!URL || ![workspaceClass respondsToSelector:@selector(defaultWorkspace)]) {
+        NSLog(@"Kayoko: LSApplicationWorkspace is unavailable for opening a script link");
+        return;
+    }
+
+    LSApplicationWorkspace *workspace = [workspaceClass defaultWorkspace];
+    if (![workspace respondsToSelector:@selector(openSensitiveURL:withOptions:error:)]) {
+        NSLog(@"Kayoko: LSApplicationWorkspace cannot open sensitive URLs");
+        return;
+    }
+
+    NSError *error = nil;
+    if (![workspace openSensitiveURL:URL withOptions:@{} error:&error]) {
+        NSLog(@"Kayoko: Failed to open %@: %@", URL, error);
+    }
+}
+
+- (void)launchApplicationWithBundleIdentifier:(NSString *)bundleIdentifier {
+    Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");
+    if (![workspaceClass respondsToSelector:@selector(defaultWorkspace)]) {
+        NSLog(@"Kayoko: LSApplicationWorkspace is unavailable for opening a script app");
+        return;
+    }
+
+    LSApplicationWorkspace *workspace = [workspaceClass defaultWorkspace];
+    if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
+        if (![(id)workspace openApplicationWithBundleID:bundleIdentifier]) {
+            NSLog(@"Kayoko: Failed to launch %@", bundleIdentifier);
+        }
+        return;
+    }
+
+    // Older builds only expose the URL entry point, and every launchable app answers its own scheme.
+    NSURL *URL = [NSURL URLWithString:[bundleIdentifier stringByAppendingString:@"://"]];
+    if (URL) {
+        [self openSensitiveURL:URL];
+    }
 }
 
 - (void)scriptPanelControllerDidBeginSearching:(KayokoScriptPanelController *)controller {

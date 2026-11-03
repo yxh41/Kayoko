@@ -17,6 +17,13 @@ NS_ASSUME_NONNULL_BEGIN
          didRequestCopyText:(NSString *)text;
 - (void)scriptPanelController:(KayokoScriptPanelController *)controller
         didRequestPasteText:(NSString *)text;
+/// The script asked to open a link. Both `url` and `urlInApp` land here; iOS 16 has no in-app browser worth
+/// faking, so the host opens it the same way.
+- (void)scriptPanelController:(KayokoScriptPanelController *)controller
+             didRequestOpenURL:(NSString *)urlString;
+/// The script asked to open an app by bundle identifier.
+- (void)scriptPanelController:(KayokoScriptPanelController *)controller
+    didRequestOpenApplication:(NSString *)bundleIdentifier;
 /// The script search wants the whole panel: the host grows it to full screen so the keyboard does not cover the
 /// list, and shrinks it back when the search ends.
 - (void)scriptPanelControllerDidBeginSearching:(KayokoScriptPanelController *)controller;

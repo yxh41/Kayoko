@@ -13,6 +13,7 @@ KayokoPreferences_FILES += ../Tweak/Core/Models/KayokoScript.m
 KayokoPreferences_FILES += ../Tweak/Core/Models/KayokoScriptResources.m
 KayokoPreferences_FILES += ../Tweak/Core/Models/KayokoScriptStore.m
 KayokoPreferences_FILES += ../Tweak/Core/Models/KayokoScriptFailure.m
+KayokoPreferences_FILES += ../Tweak/Core/Models/KayokoScriptItem.m
 KayokoPreferences_FILES += ../Tweak/Core/Models/KayokoScriptLimits.m
 KayokoPreferences_FILES += ../Tweak/Core/Actions/KayokoScriptRunner.m
 

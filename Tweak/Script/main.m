@@ -4,12 +4,14 @@
 //
 //  Runs a single user script against a single input string and prints the result as JSON.
 //
-//  Protocol
-//    stdin:  {"code": "<javascript source>", "input": "<text>"}
-//    stdout: {"results": ["...", "..."]} or {"error": "<message>", "code": "<stable-key>"}
+//  Protocol (v2)
+//    stdin:  {"code": "<javascript source>", "input": "<text>", "clipboard": {"text": "<text>"}, "limits": {...}}
+//    stdout: {"items": [{"type": "txt", "title": "...", "content": "..."}]} or {"error": "...", "code": "..."}
 //
-//  A script has to define a global function `main(text)` and may return either a single string or an
-//  array of strings. Every returned string becomes one candidate on the result page.
+//  A script has to define a global function `main(text)`. It may return a single string, an array of strings (both
+//  are the v1 shape and stay valid), a dictionary, or an array of dictionaries. Strings become `txt` items; a
+//  dictionary opts into an action (`txt`, `pb`, `url`, `urlInApp`, `app`) and may carry a `title` for the picker.
+//  Scripts can read the clipboard through `$pb.readString()`; it is pre-read by the host before the script starts.
 //
 
 #import <Foundation/Foundation.h>
@@ -28,6 +30,16 @@ static NSUInteger const kKayokoScriptMaximumResults = 100;
 static NSUInteger const kKayokoScriptMaximumResultLength = 50000;
 static NSUInteger const kKayokoScriptMaximumTotalLength = 200000;
 static NSTimeInterval const kKayokoScriptDefaultTimeout = 5.0;
+static NSUInteger const kKayokoScriptMaximumActionLength = 2048;
+static NSUInteger const kKayokoScriptMaximumTitleLength = 200;
+
+// KEEP IN SYNC with KayokoScriptItem.m: the host maps these back to its own enum, and a mismatch turns into a
+// "the script runner returned an unexpected response" failure instead of a result.
+static NSString *const kKayokoScriptItemTypeText = @"txt";
+static NSString *const kKayokoScriptItemTypePasteboard = @"pb";
+static NSString *const kKayokoScriptItemTypeURL = @"url";
+static NSString *const kKayokoScriptItemTypeURLInApp = @"urlInApp";
+static NSString *const kKayokoScriptItemTypeApplication = @"app";
 
 #pragma mark - Output
 
@@ -58,8 +70,8 @@ static void kayokoEmitPayload(NSDictionary<NSString *, id> *payload) {
     }
 }
 
-static void kayokoEmitResults(NSArray<NSString *> *results) {
-    kayokoEmitPayload(@{@"results" : results ?: @[]});
+static void kayokoEmitItems(NSArray<NSDictionary<NSString *, id> *> *items) {
+    kayokoEmitPayload(@{@"items" : items ?: @[]});
 }
 
 /// Extra keys ride along with the error so the panel can explain the failure instead of repeating it: the line
@@ -228,103 +240,219 @@ static NSString *kayokoDescribeType(JSValue *value) {
     return @"unknown";
 }
 
-static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value,
-                                                  NSUInteger maxResults,
-                                                  NSUInteger maxResultLength,
-                                                  NSUInteger maxTotalLength,
-                                                  NSString **errorCode,
-                                                  NSString **errorMessage,
-                                                  NSDictionary<NSString *, id> **errorExtra) {
+static NSMutableDictionary<NSString *, id> *kayokoItemExtras(NSUInteger itemIndex) {
+    NSMutableDictionary<NSString *, id> *extras = [@{@"stage" : @"run"} mutableCopy];
+    if (itemIndex > 0) {
+        [extras setObject:@(itemIndex) forKey:@"index"];
+    }
+    return extras;
+}
+
+static BOOL kayokoIsSupportedItemType(NSString *type) {
+    return [type isEqualToString:kKayokoScriptItemTypeText] ||
+           [type isEqualToString:kKayokoScriptItemTypePasteboard] ||
+           [type isEqualToString:kKayokoScriptItemTypeURL] ||
+           [type isEqualToString:kKayokoScriptItemTypeURLInApp] ||
+           [type isEqualToString:kKayokoScriptItemTypeApplication];
+}
+
+/// Only the two web schemes are allowed: everything else (`javascript:`, `file:`, `data:`, or an arbitrary app
+/// scheme) either has no business being triggered by a clipboard script or is a way to smuggle an action past the
+/// person who is about to tap it.
+static NSString *kayokoURLScheme(NSString *text) {
+    NSRange separator = [text rangeOfString:@"://"];
+    if (separator.location == NSNotFound || separator.location == 0) {
+        return nil;
+    }
+
+    return [[text substringToIndex:separator.location] lowercaseString];
+}
+
+static BOOL kayokoIsBundleIdentifier(NSString *text) {
+    if ([text length] == 0 || [text length] > 255) {
+        return NO;
+    }
+
+    NSCharacterSet *allowed = [NSCharacterSet
+        characterSetWithCharactersInString:@"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-_"];
+    return [text rangeOfCharacterFromSet:[allowed invertedSet]].location == NSNotFound;
+}
+
+/// One entry of the result list. A bare string is the v1 shape and stays valid; a dictionary opts into an action.
+static NSDictionary<NSString *, id> *kayokoItemFromValue(JSValue *value,
+                                                        NSUInteger itemIndex,
+                                                        NSUInteger maxResultLength,
+                                                        NSString **errorCode,
+                                                        NSString **errorMessage,
+                                                        NSDictionary<NSString *, id> **errorExtra,
+                                                        BOOL *skipped) {
+    *skipped = NO;
+
+    NSString *type = kKayokoScriptItemTypeText;
+    JSValue *contentValue = value;
+    NSString *title = nil;
+
+    BOOL isDictionaryItem = ![value isString] && ![value isArray] && [value isObject];
+    if (isDictionaryItem) {
+        JSValue *typeValue = [value valueForProperty:@"type"];
+        if (![typeValue isString] || [[typeValue toString] length] == 0) {
+            *errorCode = @"bad-item-type";
+            *errorMessage = @"Item is missing a type";
+            *errorExtra = kayokoItemExtras(itemIndex);
+            return nil;
+        }
+
+        type = [typeValue toString];
+        if (!kayokoIsSupportedItemType(type)) {
+            *errorCode = @"bad-item-type";
+            *errorMessage = @"Unknown item type";
+            NSMutableDictionary *extras = kayokoItemExtras(itemIndex);
+            [extras setObject:type forKey:@"type"];
+            *errorExtra = extras;
+            return nil;
+        }
+
+        JSValue *titleValue = [value valueForProperty:@"title"];
+        if ([titleValue isString] && [[titleValue toString] length] > 0) {
+            title = [titleValue toString];
+            if ([title length] > kKayokoScriptMaximumTitleLength) {
+                title = [title substringToIndex:kKayokoScriptMaximumTitleLength];
+            }
+        }
+
+        contentValue = [value valueForProperty:@"content"];
+    }
+
+    if (![contentValue isString]) {
+        *errorCode = @"bad-item-content";
+        *errorMessage = @"Item has no text content";
+        NSMutableDictionary *extras = kayokoItemExtras(itemIndex);
+        [extras setObject:type forKey:@"type"];
+        [extras setObject:kayokoDescribeType(contentValue) forKey:@"value"];
+        *errorExtra = extras;
+        return nil;
+    }
+
+    NSString *content = [contentValue toString];
+
+    // v1 dropped empty strings silently and scripts in the wild rely on it (`text.split('\n')` leaves a trailing
+    // empty element), so only an explicit dictionary is allowed to fail on empty content.
+    if ([content length] == 0) {
+        if (!isDictionaryItem && [type isEqualToString:kKayokoScriptItemTypeText]) {
+            *skipped = YES;
+            return nil;
+        }
+
+        *errorCode = @"bad-item-content";
+        *errorMessage = @"Item has empty content";
+        NSMutableDictionary *extras = kayokoItemExtras(itemIndex);
+        [extras setObject:type forKey:@"type"];
+        *errorExtra = extras;
+        return nil;
+    }
+
+    if ([type isEqualToString:kKayokoScriptItemTypeURL] || [type isEqualToString:kKayokoScriptItemTypeURLInApp]) {
+        if ([content length] > kKayokoScriptMaximumActionLength) {
+            *errorCode = @"bad-item-content";
+            *errorMessage = @"Link is too long";
+            NSMutableDictionary *extras = kayokoItemExtras(itemIndex);
+            [extras setObject:@([content length]) forKey:@"length"];
+            [extras setObject:@(kKayokoScriptMaximumActionLength) forKey:@"limit"];
+            *errorExtra = extras;
+            return nil;
+        }
+
+        NSString *scheme = kayokoURLScheme(content);
+        if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) {
+            *errorCode = @"action-blocked";
+            *errorMessage = @"Only http and https links can be opened";
+            NSMutableDictionary *extras = kayokoItemExtras(itemIndex);
+            [extras setObject:(scheme ?: @"none") forKey:@"scheme"];
+            *errorExtra = extras;
+            return nil;
+        }
+    } else if ([type isEqualToString:kKayokoScriptItemTypeApplication]) {
+        if ([content length] > kKayokoScriptMaximumActionLength || !kayokoIsBundleIdentifier(content)) {
+            *errorCode = @"bad-item-content";
+            *errorMessage = @"Not a bundle identifier";
+            NSMutableDictionary *extras = kayokoItemExtras(itemIndex);
+            [extras setObject:type forKey:@"type"];
+            *errorExtra = extras;
+            return nil;
+        }
+    } else if ([content length] > maxResultLength) {
+        *errorCode = @"result-too-large";
+        *errorMessage = @"Result is too large";
+        NSMutableDictionary *extras = kayokoItemExtras(itemIndex);
+        [extras setObject:@([content length]) forKey:@"length"];
+        [extras setObject:@(maxResultLength) forKey:@"limit"];
+        *errorExtra = extras;
+        return nil;
+    }
+
+    NSMutableDictionary<NSString *, id> *item = [@{@"type" : type, @"content" : content} mutableCopy];
+    if ([title length] > 0) {
+        [item setObject:title forKey:@"title"];
+    }
+    return item;
+}
+
+static NSArray<NSDictionary<NSString *, id> *> *kayokoNormalizeItems(JSValue *value,
+                                                                   NSUInteger maxResults,
+                                                                   NSUInteger maxResultLength,
+                                                                   NSUInteger maxTotalLength,
+                                                                   NSString **errorCode,
+                                                                   NSString **errorMessage,
+                                                                   NSDictionary<NSString *, id> **errorExtra) {
     if (!value || [value isUndefined] || [value isNull]) {
         return @[];
     }
 
-    if ([value isString]) {
-        NSString *text = [value toString];
-        if ([text length] == 0) {
-            return @[];
-        }
-        if ([text length] > maxResultLength) {
-            *errorCode = @"result-too-large";
-            *errorMessage = @"Result is too large";
-            *errorExtra = @{
-                @"stage" : @"run",
-                @"length" : @([text length]),
-                @"limit" : @(maxResultLength),
-            };
-            return nil;
-        }
-        return @[ text ];
+    BOOL isList = [value isArray];
+    NSUInteger count = 1;
+    if (isList) {
+        JSValue *lengthValue = [value valueForProperty:@"length"];
+        count = [lengthValue isUndefined] ? 0 : [lengthValue toUInt32];
+    }
+    if (count == 0) {
+        return @[];
     }
 
-    if (![value isArray]) {
-        *errorCode = @"bad-result-type";
-        *errorMessage = @"Expected text or a list of texts";
-        *errorExtra = @{@"stage" : @"run", @"type" : kayokoDescribeType(value)};
-        return nil;
-    }
-
-    JSValue *lengthValue = [value valueForProperty:@"length"];
-    NSUInteger length = [lengthValue isUndefined] ? 0 : [lengthValue toUInt32];
-    NSMutableArray<NSString *> *results = [NSMutableArray arrayWithCapacity:MIN(length, maxResults)];
+    NSMutableArray<NSDictionary<NSString *, id> *> *items = [NSMutableArray arrayWithCapacity:MIN(count, maxResults)];
     NSUInteger totalLength = 0;
 
-    for (NSUInteger index = 0; index < length; index++) {
-        if ([results count] >= maxResults) {
+    for (NSUInteger index = 0; index < count; index++) {
+        if ([items count] >= maxResults) {
             *errorCode = @"too-many-results";
             *errorMessage = @"Too many results";
-            *errorExtra = @{
-                @"stage" : @"run",
-                @"count" : @([results count]),
-                @"limit" : @(maxResults),
-            };
+            *errorExtra = @{@"stage" : @"run", @"count" : @([items count]), @"limit" : @(maxResults)};
             return nil;
         }
 
-        JSValue *element = [value valueAtIndex:index];
-        if (![element isString]) {
-            *errorCode = @"bad-result-type";
-            *errorMessage = @"Expected text or a list of texts";
-            *errorExtra = @{
-                @"stage" : @"run",
-                @"type" : kayokoDescribeType(element),
-                @"index" : @(index + 1),
-            };
+        JSValue *element = isList ? [value valueAtIndex:index] : value;
+        BOOL skipped = NO;
+        NSDictionary<NSString *, id> *item =
+            kayokoItemFromValue(element, isList ? index + 1 : 0, maxResultLength, errorCode, errorMessage, errorExtra,
+                                &skipped);
+        if (!item) {
+            if (skipped) {
+                continue;
+            }
             return nil;
         }
 
-        NSString *text = [element toString];
-        if ([text length] == 0) {
-            continue;
-        }
-        if ([text length] > maxResultLength) {
-            *errorCode = @"result-too-large";
-            *errorMessage = @"Result is too large";
-            *errorExtra = @{
-                @"stage" : @"run",
-                @"index" : @(index + 1),
-                @"length" : @([text length]),
-                @"limit" : @(maxResultLength),
-            };
-            return nil;
-        }
-
-        totalLength += [text length];
+        totalLength += [(NSString *)[item objectForKey:@"content"] length];
         if (totalLength > maxTotalLength) {
             *errorCode = @"result-too-large";
             *errorMessage = @"Too much text in total";
-            *errorExtra = @{
-                @"stage" : @"run",
-                @"length" : @(totalLength),
-                @"limit" : @(maxTotalLength),
-            };
+            *errorExtra = @{@"stage" : @"run", @"length" : @(totalLength), @"limit" : @(maxTotalLength)};
             return nil;
         }
 
-        [results addObject:text];
+        [items addObject:item];
     }
 
-    return results;
+    return items;
 }
 
 /// Reads the optional `limits` block of the request and clamps every value into a safe range, so a malformed or
@@ -359,14 +487,15 @@ static void kayokoParseLimits(NSDictionary *request,
     *maxTotalLength = MIN(*maxResultLength * 4, 2000000);
 }
 
-static NSArray<NSString *> *kayokoRunScript(NSString *code,
-                                            NSString *input,
-                                            NSUInteger maxResults,
-                                            NSUInteger maxResultLength,
-                                            NSUInteger maxTotalLength,
-                                            NSString **errorCode,
-                                            NSString **errorMessage,
-                                            NSDictionary<NSString *, id> **errorExtra) {
+static NSArray<NSDictionary<NSString *, id> *> *kayokoRunScript(NSString *code,
+                                                               NSString *input,
+                                                               NSString *clipboardText,
+                                                               NSUInteger maxResults,
+                                                               NSUInteger maxResultLength,
+                                                               NSUInteger maxTotalLength,
+                                                               NSString **errorCode,
+                                                               NSString **errorMessage,
+                                                               NSDictionary<NSString *, id> **errorExtra) {
     JSContext *context = [[JSContext alloc] init];
 
     [context setObject:^(JSValue *message) {
@@ -377,14 +506,23 @@ static NSArray<NSString *> *kayokoRunScript(NSString *code,
     }
                 forKeyedSubscript:@"__kayokoLog"];
 
-    // Scripts only get a console shim; there is no filesystem, network or host bridge available to them.
+    // The clipboard arrives pre-read by the host instead of being queried back over the pipe: the request is a
+    // single write, so anything the script wants has to be in it before `main` starts.
+    NSString *injectedClipboard = clipboardText ?: @"";
+    [context setObject:^NSString *(void) {
+      return injectedClipboard;
+    }
+                forKeyedSubscript:@"__kayokoClipboardText"];
+
+    // Scripts get a console shim and a read-only clipboard; there is no filesystem, network or host bridge.
     [context evaluateScript:@"var console = {"
                               @"  log: function () { __kayokoLog(Array.prototype.slice.call(arguments).map(String).join(' ')); },"
                               @"  info: function () { console.log.apply(console, arguments); },"
                               @"  warn: function () { console.log.apply(console, arguments); },"
                               @"  error: function () { console.log.apply(console, arguments); },"
                               @"  debug: function () { console.log.apply(console, arguments); }"
-                              @"};"];
+                              @"};"
+                              @"var $pb = { readString: function () { return __kayokoClipboardText(); } };"];
 
     [context evaluateScript:code];
     if ([context exception]) {
@@ -412,7 +550,8 @@ static NSArray<NSString *> *kayokoRunScript(NSString *code,
         return nil;
     }
 
-    return kayokoNormalizeResult(value, maxResults, maxResultLength, maxTotalLength, errorCode, errorMessage, errorExtra);
+    return kayokoNormalizeItems(value, maxResults, maxResultLength, maxTotalLength, errorCode, errorMessage,
+                                errorExtra);
 }
 
 #pragma mark - Entry Point
@@ -471,6 +610,15 @@ int main(int argc, char *argv[]) {
         NSUInteger maxTotalLength = 0;
         kayokoParseLimits(request, &maxResults, &maxResultLength, &maxTotalLength);
 
+        id clipboard = [request objectForKey:@"clipboard"];
+        NSString *clipboardText = @"";
+        if ([clipboard isKindOfClass:[NSDictionary class]]) {
+            id rawClipboardText = [(NSDictionary *)clipboard objectForKey:@"text"];
+            if ([rawClipboardText isKindOfClass:[NSString class]]) {
+                clipboardText = rawClipboardText;
+            }
+        }
+
         pthread_t watchdog = (pthread_t)0;
         if (pthread_create(&watchdog, NULL, kayokoWatchdogMain, &timeout) == 0) {
             pthread_detach(watchdog);
@@ -479,14 +627,15 @@ int main(int argc, char *argv[]) {
         NSString *errorCode = nil;
         NSString *errorMessage = nil;
         NSDictionary<NSString *, id> *errorExtra = nil;
-        NSArray<NSString *> *results = kayokoRunScript(code, text, maxResults, maxResultLength, maxTotalLength,
-                                                      &errorCode, &errorMessage, &errorExtra);
-        if (!results) {
+        NSArray<NSDictionary<NSString *, id> *> *items =
+            kayokoRunScript(code, text, clipboardText, maxResults, maxResultLength, maxTotalLength, &errorCode,
+                            &errorMessage, &errorExtra);
+        if (!items) {
             kayokoEmitError(errorCode, errorMessage, errorExtra);
             return 1;
         }
 
-        kayokoEmitResults(results);
+        kayokoEmitItems(items);
         return 0;
     }
 }

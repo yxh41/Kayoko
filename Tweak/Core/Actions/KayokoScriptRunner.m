@@ -7,6 +7,7 @@
 
 #import "KayokoScript.h"
 #import "KayokoScriptFailure.h"
+#import "KayokoScriptItem.h"
 #import "KayokoScriptLimits.h"
 
 #import <errno.h>
@@ -102,6 +103,7 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
 
 - (void)runScript:(KayokoScript *)script
             input:(NSString *)input
+    clipboardText:(NSString *)clipboardText
        completion:(KayokoScriptRunnerCompletion)completion {
     if (!completion) {
         return;
@@ -125,6 +127,7 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
         @"code" : [script code] ?: @"",
         @"input" : input ?: @"",
         @"limits" : limitsDictionary,
+        @"clipboard" : @{@"text" : clipboardText ?: @""},
     };
     NSData *requestData = [NSJSONSerialization dataWithJSONObject:request options:0 error:NULL];
     if ([requestData length] == 0) {
@@ -135,16 +138,16 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
     }
 
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-      NSArray<NSString *> *results = nil;
+      NSArray<KayokoScriptItem *> *items = nil;
       KayokoScriptFailure *failure = nil;
       [self executeAtPath:executorPath
               requestData:requestData
           executorTimeout:[limits timeout]
-                  results:&results
-                  failure:&failure];
+                   items:&items
+                 failure:&failure];
 
       dispatch_async(dispatch_get_main_queue(), ^{
-        completion(results, failure);
+        completion(items, failure);
       });
     });
 }
@@ -154,7 +157,7 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
 - (void)executeAtPath:(NSString *)executorPath
           requestData:(NSData *)requestData
       executorTimeout:(NSTimeInterval)executorTimeout
-              results:(NSArray<NSString *> **)results
+                items:(NSArray<KayokoScriptItem *> **)items
               failure:(KayokoScriptFailure **)failure {
     int stdinPipe[2] = {-1, -1};
     int stdoutPipe[2] = {-1, -1};
@@ -329,8 +332,13 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
         return;
     }
 
-    id rawResults = [response objectForKey:@"results"];
-    if (![rawResults isKindOfClass:[NSArray class]]) {
+    // v2 emits `items`; `results` is still read so a payload from an older executor cannot turn into
+    // "the script runner returned an unexpected response" while the two halves are being updated together.
+    id rawItems = [response objectForKey:@"items"];
+    if (![rawItems isKindOfClass:[NSArray class]]) {
+        rawItems = [response objectForKey:@"results"];
+    }
+    if (![rawItems isKindOfClass:[NSArray class]]) {
         *failure = [KayokoScriptFailure failureWithCode:@"runner-failed"
                                                 message:@"Script runner returned an unexpected response"
                                                  fields:nil
@@ -338,14 +346,26 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
         return;
     }
 
-    NSMutableArray<NSString *> *texts = [NSMutableArray array];
-    for (id entry in (NSArray *)rawResults) {
-        if ([entry isKindOfClass:[NSString class]] && [entry length] > 0) {
-            [texts addObject:entry];
+    NSMutableArray<KayokoScriptItem *> *parsedItems = [NSMutableArray array];
+    for (id entry in (NSArray *)rawItems) {
+        if ([entry isKindOfClass:[NSString class]]) {
+            if ([entry length] > 0) {
+                [parsedItems addObject:[KayokoScriptItem textItemWithContent:entry]];
+            }
+            continue;
+        }
+
+        if (![entry isKindOfClass:[NSDictionary class]]) {
+            continue;
+        }
+
+        KayokoScriptItem *item = [KayokoScriptItem itemWithDictionary:entry];
+        if (item) {
+            [parsedItems addObject:item];
         }
     }
 
-    *results = texts;
+    *items = parsedItems;
 }
 
 @end

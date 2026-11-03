@@ -8,6 +8,7 @@
 #import "KayokoKeyboardAvoidanceCoordinator.h"
 #import "KayokoScript.h"
 #import "KayokoScriptFailure.h"
+#import "KayokoScriptItem.h"
 #import "KayokoScriptRunner.h"
 
 #import <UIKit/UIKit.h>
@@ -178,6 +179,8 @@ static CGFloat const kKayokoScriptEditorCodeHeight = 300.0;
 @property(nonatomic, strong, nullable) UITableViewCell *inputCell;
 @property(nonatomic, strong, nullable) UITableViewCell *codeCell;
 @property(nonatomic, assign, getter=isRunning) BOOL running;
+
++ (NSArray<NSString *> *)descriptionsForItems:(NSArray<KayokoScriptItem *> *)items;
 
 @end
 
@@ -481,9 +484,12 @@ static CGFloat const kKayokoScriptEditorCodeHeight = 300.0;
                     withRowAnimation:UITableViewRowAnimationNone];
 
     __weak typeof(self) weakSelf = self;
+    // The pasteboard is deliberately not read here: this page runs inside Settings, and a dry run is not worth
+    // an "Allow Paste" prompt. `$pb.readString()` gets an empty string and the sample input field is the input.
     [[self runner] runScript:script
                        input:[[self inputField] text] ?: @""
-                  completion:^(NSArray<NSString *> *_Nullable results, KayokoScriptFailure *_Nullable failure) {
+               clipboardText:nil
+                  completion:^(NSArray<KayokoScriptItem *> *_Nullable items, KayokoScriptFailure *_Nullable failure) {
                     __strong typeof(weakSelf) strongSelf = weakSelf;
                     if (!strongSelf) {
                         return;
@@ -494,9 +500,26 @@ static CGFloat const kKayokoScriptEditorCodeHeight = 300.0;
                                           withRowAnimation:UITableViewRowAnimationNone];
 
                     [strongSelf presentOutputWithInput:[[strongSelf inputField] text] ?: @""
-                                               results:results
+                                               results:[[strongSelf class] descriptionsForItems:items]
                                               failure:failure];
                   }];
+}
+
+/// The dry run answers "what did it produce", so an action is shown with its type in front: a `pb` item that
+/// looks like plain text would otherwise read as a no-op.
++ (NSArray<NSString *> *)descriptionsForItems:(NSArray<KayokoScriptItem *> *)items {
+    NSMutableArray<NSString *> *descriptions = [NSMutableArray array];
+    for (KayokoScriptItem *item in items) {
+        NSString *typeIdentifier = [[KayokoScriptItem class] typeIdentifierForType:[item type]];
+        if (![item isAction] || [typeIdentifier length] == 0) {
+            [descriptions addObject:[item content]];
+            continue;
+        }
+
+        [descriptions addObject:[NSString stringWithFormat:@"[%@] %@", typeIdentifier, [item content]]];
+    }
+
+    return descriptions;
 }
 
 - (void)exportScript {
@@ -549,8 +572,7 @@ static CGFloat const kKayokoScriptEditorCodeHeight = 300.0;
 
 - (void)presentOutputWithInput:(NSString *)input
                        results:(NSArray<NSString *> *)results
-                      failure:(KayokoScriptFailure *)failure {
-    KayokoScriptOutputViewController *output =
+                      failure:(KayokoScriptFailure *)failure {    KayokoScriptOutputViewController *output =
         [[KayokoScriptOutputViewController alloc] initWithInput:input
                                                       results:results
                                                      failure:failure

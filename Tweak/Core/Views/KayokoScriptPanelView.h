@@ -30,6 +30,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setSearchBarVisible:(BOOL)visible;
 - (void)setSearchBarVisible:(BOOL)visible animated:(BOOL)animated;
 - (void)showResultWithText:(NSString *)text countText:(nullable NSString *)countText;
+/// Same page, but the trailing button performs an action instead of pasting: `actionTitle` is what it says
+/// ("Open link", "Open app"), and a nil title restores the plain paste button.
+- (void)showResultWithText:(NSString *)text
+                 countText:(nullable NSString *)countText
+               actionTitle:(nullable NSString *)actionTitle;
 /// The failure page reuses the result layout: the text is a diagnostic, and the only thing worth offering on a
 /// failed run is the ability to copy it somewhere the user can act on it.
 - (void)showFailureWithText:(NSString *)text copyTitle:(NSString *)copyTitle;

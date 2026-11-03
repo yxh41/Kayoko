@@ -10,6 +10,7 @@
 #import "KayokoPasteboardManager.h"
 #import "KayokoScript.h"
 #import "KayokoScriptFailure.h"
+#import "KayokoScriptItem.h"
 #import "KayokoScriptListCell.h"
 #import "KayokoScriptPanelView.h"
 #import "KayokoScriptRunner.h"
@@ -40,7 +41,10 @@ static NSString *KayokoScriptPanelLocalized(NSString *key, NSString *fallback) {
 @property(nonatomic, copy) NSArray<KayokoScript *> *scripts;
 /// What the list actually shows; a subset of `scripts` while a search query is active, equal to it otherwise.
 @property(nonatomic, copy) NSArray<KayokoScript *> *filteredScripts;
-@property(nonatomic, copy) NSArray<NSString *> *values;
+@property(nonatomic, copy) NSArray<KayokoScriptItem *> *values;
+/// Set while the result page is showing an action, so the trailing button knows it must open something instead
+/// of pasting the text on screen.
+@property(nonatomic, strong, nullable) KayokoScriptItem *actionItem;
 @property(nonatomic, copy, nullable) NSString *resultText;
 @property(nonatomic, strong, nullable) KayokoScript *activeScript;
 @property(nonatomic, assign) KayokoScriptPanelState state;
@@ -49,6 +53,8 @@ static NSString *KayokoScriptPanelLocalized(NSString *key, NSString *fallback) {
 @property(nonatomic, assign) BOOL searchBarRevealed;
 /// Bumped on every reset so a late runner callback cannot resurrect a panel the user already left.
 @property(nonatomic, assign) NSUInteger generation;
+
++ (nullable NSString *)displayNameForBundleIdentifier:(NSString *)bundleIdentifier;
 
 @end
 
@@ -92,6 +98,7 @@ NS_ASSUME_NONNULL_END
     [self setInputText:text ?: @""];
     [self setActiveScript:nil];
     [self setValues:@[]];
+    [self setActionItem:nil];
     [self setResultText:nil];
     [self setRunning:NO];
     [self setGeneration:[self generation] + 1];
@@ -109,6 +116,7 @@ NS_ASSUME_NONNULL_END
     [self setInputText:@""];
     [self setActiveScript:nil];
     [self setValues:@[]];
+    [self setActionItem:nil];
     [self setResultText:nil];
     [self setRunning:NO];
     [self setScripts:@[]];
@@ -121,6 +129,7 @@ NS_ASSUME_NONNULL_END
 
 - (void)showListState {
     [self setState:KayokoScriptPanelStateList];
+    [self setActionItem:nil];
     [self setFilteredScripts:[self scripts]];
     // The search bar is pull-to-reveal, exactly like the history list, so every fresh list starts collapsed.
     [self setSearchBarRevealed:NO];
@@ -142,16 +151,79 @@ NS_ASSUME_NONNULL_END
     [[self panelView] showList];
 }
 
-- (void)showResultStateWithText:(NSString *)text {
+- (void)showResultStateWithItem:(KayokoScriptItem *)item {
     [self setState:KayokoScriptPanelStateResult];
     [[[self panelView] searchBar] resignFirstResponder];
     [[self panelView] setSearchBarVisible:NO];
-    [self setResultText:text];
 
-    NSString *format = KayokoScriptPanelLocalized(@"%lu characters", @"%lu characters");
-    NSString *countText = [NSString stringWithFormat:format, (unsigned long)[text length]];
+    NSString *text = [item content];
+    [self setResultText:text];
+    [self setActionItem:([item isAction] ? item : nil)];
     [[self panelView] setTitleText:[self activeScriptTitle]];
-    [[self panelView] showResultWithText:text countText:countText];
+
+    NSString *actionTitle = nil;
+    NSString *countText = nil;
+    switch ([item type]) {
+    case KayokoScriptItemTypeURL:
+    case KayokoScriptItemTypeURLInApp:
+        actionTitle = KayokoScriptPanelLocalized(@"Open link", @"Open link");
+        break;
+    case KayokoScriptItemTypeApplication: {
+        NSString *name = [[self class] displayNameForBundleIdentifier:text];
+        actionTitle = [name length] > 0
+                          ? [NSString stringWithFormat:KayokoScriptPanelLocalized(@"Open %@", @"Open %@"), name]
+                          : KayokoScriptPanelLocalized(@"Open app", @"Open app");
+        break;
+    }
+    case KayokoScriptItemTypeText:
+    case KayokoScriptItemTypePasteboard:
+        countText = [NSString stringWithFormat:KayokoScriptPanelLocalized(@"%lu characters", @"%lu characters"),
+                                               (unsigned long)[text length]];
+        break;
+    }
+
+    [[self panelView] showResultWithText:text countText:countText actionTitle:actionTitle];
+}
+
+/// Runs what a picked row asked for. `pb` acts immediately (it is the same thing as tapping a history entry),
+/// everything else opens the result page first: opening an app is not something to do behind the user's back.
+- (void)activateItem:(KayokoScriptItem *)item {
+    if ([item type] == KayokoScriptItemTypePasteboard) {
+        [self setActionItem:nil];
+        [[self delegate] scriptPanelController:self didRequestCopyText:[item content]];
+        if ([self hapticFeedbackHandler]) {
+            [self hapticFeedbackHandler](UIImpactFeedbackStyleLight);
+        }
+        return;
+    }
+
+    [self showResultStateWithItem:item];
+    if ([self hapticFeedbackHandler]) {
+        [self hapticFeedbackHandler](UIImpactFeedbackStyleLight);
+    }
+}
+
+#pragma mark - App Names
+
+/// Best-effort display name; a script can name an app the user has never installed, so every step is optional and
+/// the bundle identifier stands in when nothing answers.
++ (nullable NSString *)displayNameForBundleIdentifier:(NSString *)bundleIdentifier {
+    if ([bundleIdentifier length] == 0) {
+        return nil;
+    }
+
+    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+    if (![proxyClass respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
+        return nil;
+    }
+
+    id proxy = [(id)proxyClass applicationProxyForIdentifier:bundleIdentifier];
+    if (![proxy respondsToSelector:@selector(localizedName)]) {
+        return nil;
+    }
+
+    id name = [proxy localizedName];
+    return [name isKindOfClass:[NSString class]] && [name length] > 0 ? name : nil;
 }
 
 - (NSString *)activeScriptTitle {
@@ -180,7 +252,8 @@ NS_ASSUME_NONNULL_END
     __weak typeof(self) weakSelf = self;
     [[self runner] runScript:script
                        input:[self inputText]
-                  completion:^(NSArray<NSString *> *_Nullable results, KayokoScriptFailure *_Nullable failure) {
+               clipboardText:[[UIPasteboard generalPasteboard] string]
+                  completion:^(NSArray<KayokoScriptItem *> *_Nullable items, KayokoScriptFailure *_Nullable failure) {
                     __strong typeof(weakSelf) strongSelf = weakSelf;
                     if (!strongSelf) {
                         return;
@@ -198,18 +271,15 @@ NS_ASSUME_NONNULL_END
                         [strongSelf showFailureStateWithFailure:failure];
                         return;
                     }
-                    if ([results count] == 0) {
+                    if ([items count] == 0) {
                         [KayokoHUD showTransientStatus:KayokoScriptPanelLocalized(@"No matches",
                                                                                  @"No matches")];
                         return;
                     }
 
-                    [strongSelf setValues:results ?: @[]];
-                    if ([results count] == 1) {
-                        NSString *singleResult = [results firstObject];
-                        if ([singleResult length] > 0) {
-                            [strongSelf showResultStateWithText:singleResult];
-                        }
+                    [strongSelf setValues:items ?: @[]];
+                    if ([items count] == 1) {
+                        [strongSelf activateItem:[items firstObject]];
                     } else {
                         [strongSelf showChoicesState];
                     }
@@ -320,6 +390,36 @@ NS_ASSUME_NONNULL_END
                              type ?: @"?"];
     }
 
+    if ([code isEqualToString:@"bad-item-type"]) {
+        NSString *type = [failure stringForKey:@"type"];
+        if ([type length] > 0) {
+            return [NSString
+                stringWithFormat:KayokoScriptPanelLocalized(@"Unknown item type \"%@\"",
+                                                            @"Unknown item type \"%@\""),
+                                 type];
+        }
+        return KayokoScriptPanelLocalized(@"An item is missing its type", @"An item is missing its type");
+    }
+
+    if ([code isEqualToString:@"bad-item-content"]) {
+        NSNumber *index = [failure numberForKey:@"index"];
+        NSString *type = [failure stringForKey:@"type"];
+        if ([index integerValue] > 0 && [type length] > 0) {
+            return [NSString
+                stringWithFormat:KayokoScriptPanelLocalized(@"Item %ld (%@) has no usable content",
+                                                            @"Item %ld (%@) has no usable content"),
+                                 (long)[index integerValue], type];
+        }
+        return KayokoScriptPanelLocalized(@"An item has no usable content", @"An item has no usable content");
+    }
+
+    if ([code isEqualToString:@"action-blocked"]) {
+        NSString *scheme = [failure stringForKey:@"scheme"];
+        return [NSString
+            stringWithFormat:KayokoScriptPanelLocalized(@"Cannot open a %@ link", @"Cannot open a %@ link"),
+                             scheme ?: @"?"];
+    }
+
     if ([code isEqualToString:@"too-many-results"]) {
         NSNumber *count = [failure numberForKey:@"count"];
         NSNumber *limit = [failure numberForKey:@"limit"];
@@ -411,6 +511,17 @@ NS_ASSUME_NONNULL_END
 }
 
 - (void)handlePasteButtonPressed {
+    KayokoScriptItem *actionItem = [self actionItem];
+    if (actionItem) {
+        KayokoScriptItemType type = [actionItem type];
+        if (type == KayokoScriptItemTypeURL || type == KayokoScriptItemTypeURLInApp) {
+            [[self delegate] scriptPanelController:self didRequestOpenURL:[actionItem content]];
+        } else if (type == KayokoScriptItemTypeApplication) {
+            [[self delegate] scriptPanelController:self didRequestOpenApplication:[actionItem content]];
+        }
+        return;
+    }
+
     NSString *text = [self resultText];
     if ([text length] == 0) {
         return;
@@ -440,8 +551,8 @@ NS_ASSUME_NONNULL_END
         KayokoScript *script = [[self filteredScripts] objectAtIndex:(NSUInteger)[indexPath row]];
         [cell updateWithTitle:[script displayName] truncatesInMiddle:NO];
     } else {
-        NSString *value = [[self values] objectAtIndex:(NSUInteger)[indexPath row]];
-        [cell updateWithTitle:value truncatesInMiddle:YES];
+        KayokoScriptItem *item = [[self values] objectAtIndex:(NSUInteger)[indexPath row]];
+        [cell updateWithTitle:[item displayTitle] truncatesInMiddle:YES];
     }
 
     return cell;
@@ -461,10 +572,7 @@ NS_ASSUME_NONNULL_END
     }
 
     if (row < [[self values] count]) {
-        [self showResultStateWithText:[[self values] objectAtIndex:row]];
-        if ([self hapticFeedbackHandler]) {
-            [self hapticFeedbackHandler](UIImpactFeedbackStyleLight);
-        }
+        [self activateItem:[[self values] objectAtIndex:row]];
     }
 }
 

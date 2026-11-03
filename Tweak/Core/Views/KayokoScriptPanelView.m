@@ -288,10 +288,19 @@ NS_ASSUME_NONNULL_END
 }
 
 - (void)showResultWithText:(NSString *)text countText:(nullable NSString *)countText {
+    [self showResultWithText:text countText:countText actionTitle:nil];
+}
+
+- (void)showResultWithText:(NSString *)text
+                 countText:(nullable NSString *)countText
+               actionTitle:(nullable NSString *)actionTitle {
     // The failure page hides the paste button and renames the copy one, so both are put back before a real
     // result is shown.
     [[self resultPasteButton] setHidden:NO];
     [[self resultCopyButton] setTitle:[self defaultCopyTitle] forState:UIControlStateNormal];
+    NSString *pasteTitle =
+        [actionTitle length] > 0 ? actionTitle : KayokoScriptPanelLocalizedString(@"Paste", @"Paste");
+    [[self resultPasteButton] setTitle:pasteTitle forState:UIControlStateNormal];
     [[self resultTextView] setText:text ?: @""];
     [[self resultTextView] setContentOffset:CGPointZero animated:NO];
     [[self resultCountLabel] setText:countText];
