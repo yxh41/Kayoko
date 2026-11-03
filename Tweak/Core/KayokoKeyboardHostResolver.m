@@ -14,6 +14,16 @@ static NSString *const kKayokoSpotlightBundleIdentifier = @"com.apple.Spotlight"
 static NSString *const kKayokoSpringBoardBundleIdentifier = @"com.apple.springboard";
 static NSString *const kKayokoSpringBoardProcessName = @"SpringBoard";
 
+// The keyboard scene keeps reporting its previous host after the keyboard is
+// dismissed, so a cached external host is only believable for a short while.
+static NSTimeInterval const kKayokoKeyboardHostSourceAttributionCacheTTL = 5.0;
+
+typedef NS_ENUM(NSInteger, KayokoKeyboardOnScreenState) {
+    KayokoKeyboardOnScreenStateUnknown = -1,
+    KayokoKeyboardOnScreenStateHidden = 0,
+    KayokoKeyboardOnScreenStateVisible = 1,
+};
+
 @class BSSettings;
 @class FBSSceneIdentityToken;
 
@@ -62,6 +72,15 @@ static NSString *const kKayokoSpringBoardProcessName = @"SpringBoard";
 + (UIKeyboardImpl *)activeInstance;
 @end
 
+@protocol KayokoUIPeripheralHostClass <NSObject>
++ (instancetype)sharedInstance;
++ (NSArray<NSValue *> *)allVisiblePeripheralFrames;
+@end
+
+@protocol KayokoUIPeripheralHostInstance <NSObject>
+- (BOOL)isOnScreen;
+@end
+
 NS_ASSUME_NONNULL_BEGIN
 
 @interface KayokoKeyboardHostContext ()
@@ -101,6 +120,7 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - Cache
 
 @property(nonatomic, strong, nullable) KayokoKeyboardHostContext *lastExternalKeyboardHostContext;
+@property(nonatomic, assign) NSTimeInterval lastExternalKeyboardHostContextUpdatedAt;
 
 #pragma mark - Lifecycle
 
@@ -116,6 +136,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable FBScene *)keyboardHostSceneWithIdentifier:(NSString *_Nullable *_Nullable)identifier;
 - (nullable NSString *)bundleIdentifierForScene:(FBScene *)scene kind:(KayokoKeyboardHostKind)kind;
 - (nullable UIResponder *)activeKeyboardInputDelegate;
+
+#pragma mark - Screen State
+
+- (KayokoKeyboardOnScreenState)keyboardOnScreenState;
+- (nullable KayokoKeyboardHostContext *)sourceAttributionCachedExternalHostContext;
 
 #pragma mark - Ownership
 
@@ -233,11 +258,24 @@ NS_ASSUME_NONNULL_END
 - (KayokoKeyboardHostContext *)keyboardHostContextForSourceAttribution {
     BOOL kayokoOwned = [self currentKeyboardInputIsKayokoOwned];
     KayokoKeyboardHostContext *currentContext = [self keyboardHostContextForCurrentInputKayokoOwned:kayokoOwned];
+    KayokoKeyboardOnScreenState screenState = [self keyboardOnScreenState];
+
     if (currentContext && !currentContext.isKayokoOwned) {
+        if (screenState == KayokoKeyboardOnScreenStateHidden) {
+            // The keyboard scene still points at the last app that raised a
+            // keyboard, so an off screen keyboard makes that host a leftover
+            // from an older app. Reporting it would blame an innocent app.
+            HBLogDebug(@"Kayoko: keyboard host resolver ignoring keyboard host for source attribution because the "
+                       @"keyboard is off screen currentScene=%@ kind=%@ helperFlag=%lld",
+                       currentContext.identifier ?: @"nil", [[self class] stringForHostKind:currentContext.kind],
+                       currentContext.helperInjectedFlag);
+            return nil;
+        }
+
         return currentContext;
     }
 
-    KayokoKeyboardHostContext *cachedContext = [self.lastExternalKeyboardHostContext contextMarkedCached];
+    KayokoKeyboardHostContext *cachedContext = [self sourceAttributionCachedExternalHostContext];
     if (kayokoOwned) {
         if (cachedContext) {
             HBLogDebug(@"Kayoko: keyboard host resolver using cached external host for source attribution because "
@@ -245,7 +283,7 @@ NS_ASSUME_NONNULL_END
                        currentContext.identifier ?: @"nil", cachedContext.identifier,
                        [[self class] stringForHostKind:cachedContext.kind], cachedContext.helperInjectedFlag);
         } else {
-            HBLogDebug(@"Kayoko: keyboard host resolver has Kayoko-owned input but no cached external host for "
+            HBLogDebug(@"Kayoko: keyboard host resolver has Kayoko-owned input but no fresh cached external host for "
                        @"source attribution currentScene=%@",
                        currentContext.identifier ?: @"nil");
         }
@@ -263,6 +301,51 @@ NS_ASSUME_NONNULL_END
                    currentContext.identifier ?: @"nil");
     }
     return nil;
+}
+
+- (nullable KayokoKeyboardHostContext *)sourceAttributionCachedExternalHostContext {
+    KayokoKeyboardHostContext *cachedContext = [self.lastExternalKeyboardHostContext contextMarkedCached];
+    if (!cachedContext) {
+        return nil;
+    }
+
+    NSTimeInterval age = [[NSProcessInfo processInfo] systemUptime] - [self lastExternalKeyboardHostContextUpdatedAt];
+    if (!isfinite(age) || age < 0 || age > kKayokoKeyboardHostSourceAttributionCacheTTL) {
+        HBLogDebug(@"Kayoko: keyboard host resolver ignoring stale cached external host for source attribution "
+                   @"age=%.2f cachedScene=%@ cachedKind=%@",
+                   age, cachedContext.identifier, [[self class] stringForHostKind:cachedContext.kind]);
+        return nil;
+    }
+
+    return cachedContext;
+}
+
+#pragma mark - Screen State
+
+- (KayokoKeyboardOnScreenState)keyboardOnScreenState {
+    Class<KayokoUIPeripheralHostClass> hostClass =
+        (Class<KayokoUIPeripheralHostClass>)NSClassFromString(@"UIPeripheralHost");
+    if (![hostClass respondsToSelector:@selector(sharedInstance)]) {
+        return KayokoKeyboardOnScreenStateUnknown;
+    }
+
+    id host = [(id)hostClass sharedInstance];
+    if (![host respondsToSelector:@selector(isOnScreen)]) {
+        return KayokoKeyboardOnScreenStateUnknown;
+    }
+
+    if (![(id<KayokoUIPeripheralHostInstance>)host isOnScreen]) {
+        return KayokoKeyboardOnScreenStateHidden;
+    }
+
+    if ([hostClass respondsToSelector:@selector(allVisiblePeripheralFrames)]) {
+        NSArray<NSValue *> *visibleFrames = [hostClass allVisiblePeripheralFrames];
+        if ([visibleFrames isKindOfClass:[NSArray class]] && [visibleFrames count] == 0) {
+            return KayokoKeyboardOnScreenStateHidden;
+        }
+    }
+
+    return KayokoKeyboardOnScreenStateVisible;
 }
 
 - (FBScene *)currentKeyboardHostScene {
@@ -333,6 +416,7 @@ NS_ASSUME_NONNULL_END
                                                                     cached:NO];
     if (context && !kayokoOwned) {
         self.lastExternalKeyboardHostContext = context;
+        self.lastExternalKeyboardHostContextUpdatedAt = [[NSProcessInfo processInfo] systemUptime];
     }
     return context;
 }
