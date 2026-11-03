@@ -20,7 +20,6 @@
 #import <roothide.h>
 
 static NSString *const kKayokoScriptExecutorName = @"kayoko_script";
-static NSTimeInterval const kKayokoScriptRunnerTimeout = 6.0;
 static NSUInteger const kKayokoScriptRunnerMaximumOutputBytes = 4 * 1024 * 1024;
 /// console.log is a debug aid, not a result: keep the tail of it and drop the rest rather than let a chatty
 /// script fill memory (or block on a full pipe once this side stops reading).
@@ -226,7 +225,7 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
     NSMutableData *output = [NSMutableData data];
     NSMutableData *logData = [NSMutableData data];
     BOOL logTruncated = NO;
-    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:kKayokoScriptRunnerTimeout];
+    NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:executorTimeout];
     BOOL timedOut = NO;
     BOOL outputExceededLimit = NO;
     BOOL stdoutOpen = YES;
@@ -298,7 +297,7 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
         *failure = [KayokoScriptFailure
             failureWithCode:@"timeout"
                    message:@"Script timed out"
-                    fields:@{@"stage" : @"run", @"seconds" : @(kKayokoScriptRunnerExecutorTimeout)}
+                    fields:@{@"stage" : @"run", @"seconds" : @(executorTimeout)}
                       logs:logs];
         return;
     }
