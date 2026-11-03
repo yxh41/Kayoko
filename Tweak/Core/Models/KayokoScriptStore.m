@@ -24,7 +24,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSArray<NSDictionary<NSString *, id> *> *)dictionaryArrayAtPath:(NSString *)path;
 - (nullable NSArray<NSDictionary<NSString *, id> *> *)bundledScriptDictionaries;
 - (BOOL)persistScriptDictionaries:(NSArray<NSDictionary<NSString *, id> *> *)dictionaries
-                            error:(nullable NSError **)error;
+                            error:(NSError *_Nullable *_Nullable)error;
 
 @end
 
@@ -141,7 +141,7 @@ NS_ASSUME_NONNULL_END
 
 #pragma mark - Writing
 
-- (BOOL)saveScripts:(NSArray<KayokoScript *> *)scripts error:(nullable NSError **)error {
+- (BOOL)saveScripts:(NSArray<KayokoScript *> *)scripts error:(NSError *_Nullable *_Nullable)error {
     NSMutableArray<NSDictionary<NSString *, id> *> *dictionaries = [NSMutableArray arrayWithCapacity:[scripts count]];
     for (KayokoScript *script in scripts) {
         NSDictionary<NSString *, id> *dictionary = [script dictionaryRepresentation];
@@ -159,7 +159,7 @@ NS_ASSUME_NONNULL_END
 }
 
 - (BOOL)persistScriptDictionaries:(NSArray<NSDictionary<NSString *, id> *> *)dictionaries
-                            error:(nullable NSError **)error {
+                            error:(NSError *_Nullable *_Nullable)error {
     NSString *directoryPath = jbroot(kKayokoScriptStoreDataDirectoryPath);
     NSFileManager *fileManager = [NSFileManager defaultManager];
     if (![fileManager fileExistsAtPath:directoryPath]) {

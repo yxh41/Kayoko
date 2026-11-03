@@ -19,7 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSArray<KayokoScript *> *)enabledScripts;
 - (void)reload;
 
-- (BOOL)saveScripts:(NSArray<KayokoScript *> *)scripts error:(nullable NSError **)error;
+- (BOOL)saveScripts:(NSArray<KayokoScript *> *)scripts error:(NSError *_Nullable *_Nullable)error;
 
 @end
 
