@@ -103,7 +103,7 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
 
 - (void)runScript:(KayokoScript *)script
             input:(NSString *)input
-    clipboardText:(NSString *)clipboardText
+    clipboardText:(nullable NSString *)clipboardText
        completion:(KayokoScriptRunnerCompletion)completion {
     if (!completion) {
         return;
