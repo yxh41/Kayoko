@@ -17,6 +17,10 @@ NS_ASSUME_NONNULL_BEGIN
          didRequestCopyText:(NSString *)text;
 - (void)scriptPanelController:(KayokoScriptPanelController *)controller
         didRequestPasteText:(NSString *)text;
+/// The script search wants the whole panel: the host grows it to full screen so the keyboard does not cover the
+/// list, and shrinks it back when the search ends.
+- (void)scriptPanelControllerDidBeginSearching:(KayokoScriptPanelController *)controller;
+- (void)scriptPanelControllerDidEndSearching:(KayokoScriptPanelController *)controller;
 
 @end
 

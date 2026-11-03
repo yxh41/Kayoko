@@ -107,15 +107,34 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"KayokoScriptLimitsCell"];
-    if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"KayokoScriptLimitsCell"];
-    }
+    KayokoScriptLimitsRow row = (KayokoScriptLimitsRow)[indexPath row];
 
-    [[cell textLabel] setText:[self titleForRow:(KayokoScriptLimitsRow)[indexPath row]]];
+    // Only three rows, so a fresh cell is cheaper than guarding a reused one against a stepper that belonged to
+    // another row. Title | value | stepper are laid out left to right, which is what stops the value from
+    // sliding under the stepper the way a right-unbounded label did.
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault
+                                                   reuseIdentifier:nil];
+    [cell setSelectionStyle:UITableViewCellSelectionStyleNone];
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    [titleLabel setText:[self titleForRow:row]];
+    [titleLabel setFont:[UIFont systemFontOfSize:17]];
+    [titleLabel setTextColor:[UIColor labelColor]];
+    [titleLabel setContentHuggingPriority:UILayoutPriorityDefaultLow forAxis:UILayoutConstraintAxisHorizontal];
+    [titleLabel setContentCompressionResistancePriority:UILayoutPriorityDefaultLow
+                                                forAxis:UILayoutConstraintAxisHorizontal];
+
+    UILabel *valueLabel = [[UILabel alloc] init];
+    [valueLabel setText:[self valueTextForRow:row]];
+    [valueLabel setFont:[UIFont systemFontOfSize:15 weight:UIFontWeightMedium]];
+    [valueLabel setTextColor:[UIColor secondaryLabelColor]];
+    [valueLabel setTextAlignment:NSTextAlignmentRight];
+    [valueLabel setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
+    [valueLabel setContentCompressionResistancePriority:UILayoutPriorityRequired
+                                                forAxis:UILayoutConstraintAxisHorizontal];
 
     UIStepper *stepper = [[UIStepper alloc] init];
-    switch ((KayokoScriptLimitsRow)[indexPath row]) {
+    switch (row) {
     case KayokoScriptLimitsRowTimeout:
         [stepper setMinimumValue:1];
         [stepper setMaximumValue:30];
@@ -137,27 +156,24 @@ typedef NS_ENUM(NSInteger, KayokoScriptLimitsRow) {
     default:
         break;
     }
-
     [stepper setTag:[indexPath row]];
     [stepper addTarget:self action:@selector(stepperChanged:) forControlEvents:UIControlEventValueChanged];
-    [cell setAccessoryView:stepper];
+    [stepper setContentHuggingPriority:UILayoutPriorityRequired forAxis:UILayoutConstraintAxisHorizontal];
 
-    // A fresh label per cell avoids pinning a reused cell to a value label that belonged to another row.
-    UIView *existing = [[cell contentView] viewWithTag:101];
-    if (existing) {
-        [existing removeFromSuperview];
-    }
-    UILabel *valueLabel = [[UILabel alloc] init];
-    [valueLabel setTag:101];
-    [valueLabel setFont:[UIFont systemFontOfSize:15 weight:UIFontWeightMedium]];
-    [valueLabel setTextColor:[UIColor labelColor]];
-    [valueLabel setTextAlignment:NSTextAlignmentRight];
-    [valueLabel setText:[self valueTextForRow:(KayokoScriptLimitsRow)[indexPath row]]];
-    [valueLabel setTranslatesAutoresizingMaskIntoConstraints:NO];
-    [[cell contentView] addSubview:valueLabel];
+    UIStackView *stack =
+        [[UIStackView alloc] initWithArrangedSubviews:@[ titleLabel, valueLabel, stepper ]];
+    [stack setAxis:UILayoutConstraintAxisHorizontal];
+    [stack setAlignment:UIStackViewAlignmentCenter];
+    [stack setSpacing:8];
+    [stack setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [[cell contentView] addSubview:stack];
+
+    UILayoutGuide *margins = [[cell contentView] layoutMarginsGuide];
     [NSLayoutConstraint activateConstraints:@[
-        [[valueLabel centerYAnchor] constraintEqualToAnchor:[[cell contentView] centerYAnchor]],
-        [[valueLabel leadingAnchor] constraintEqualToAnchor:[[cell textLabel] trailingAnchor] constant:8],
+        [[stack topAnchor] constraintEqualToAnchor:[margins topAnchor]],
+        [[stack bottomAnchor] constraintEqualToAnchor:[margins bottomAnchor]],
+        [[stack leadingAnchor] constraintEqualToAnchor:[margins leadingAnchor]],
+        [[stack trailingAnchor] constraintEqualToAnchor:[margins trailingAnchor]],
     ]];
 
     return cell;

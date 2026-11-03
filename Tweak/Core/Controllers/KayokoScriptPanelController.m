@@ -45,6 +45,8 @@ static NSString *KayokoScriptPanelLocalized(NSString *key, NSString *fallback) {
 @property(nonatomic, strong, nullable) KayokoScript *activeScript;
 @property(nonatomic, assign) KayokoScriptPanelState state;
 @property(nonatomic, assign, getter=isRunning) BOOL running;
+/// Whether the pull-down gesture has already revealed the search bar for this visit to the list.
+@property(nonatomic, assign) BOOL searchBarRevealed;
 /// Bumped on every reset so a late runner callback cannot resurrect a panel the user already left.
 @property(nonatomic, assign) NSUInteger generation;
 
@@ -120,9 +122,11 @@ NS_ASSUME_NONNULL_END
 - (void)showListState {
     [self setState:KayokoScriptPanelStateList];
     [self setFilteredScripts:[self scripts]];
+    // The search bar is pull-to-reveal, exactly like the history list, so every fresh list starts collapsed.
+    [self setSearchBarRevealed:NO];
     [[[self panelView] searchBar] setText:@""];
     [[[self panelView] searchBar] resignFirstResponder];
-    [[self panelView] setSearchBarVisible:([[self scripts] count] > 0)];
+    [[self panelView] setSearchBarVisible:NO animated:NO];
     [[self panelView] setTitleText:KayokoScriptPanelLocalized(@"Scripts", @"Scripts")];
     [[self panelView] showList];
     if ([[self scripts] count] == 0) {
@@ -464,14 +468,36 @@ NS_ASSUME_NONNULL_END
     }
 }
 
+#pragma mark - UIScrollViewDelegate
+
+- (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    if ([self state] != KayokoScriptPanelStateList) {
+        return;
+    }
+    if ([self isRunning] || [self searchBarRevealed]) {
+        return;
+    }
+
+    // The list rests at -contentInset.top, so any negative overscroll past it is the user pulling down: reveal
+    // the search bar once it clears a small threshold. It stays revealed until cancel, which mirrors the way the
+    // history list snaps its search bar out but never yanks it away mid-typing.
+    CGFloat overscroll = -(scrollView.contentOffset.y + scrollView.contentInset.top);
+    if (overscroll > 24.0) {
+        [self setSearchBarRevealed:YES];
+        [[self panelView] setSearchBarVisible:YES animated:YES];
+    }
+}
+
 #pragma mark - UISearchBarDelegate
 
 - (void)searchBarTextDidBeginEditing:(UISearchBar *)searchBar {
     [searchBar setShowsCancelButton:YES animated:YES];
+    [[self delegate] scriptPanelControllerDidBeginSearching:self];
 }
 
 - (void)searchBarTextDidEndEditing:(UISearchBar *)searchBar {
     [searchBar setShowsCancelButton:NO animated:YES];
+    [[self delegate] scriptPanelControllerDidEndSearching:self];
 }
 
 - (void)searchBar:(UISearchBar *)searchBar textDidChange:(NSString *)searchText {
@@ -486,6 +512,8 @@ NS_ASSUME_NONNULL_END
     [searchBar setText:@""];
     [self applyScriptFilter:@""];
     [searchBar resignFirstResponder];
+    [self setSearchBarRevealed:NO];
+    [[self panelView] setSearchBarVisible:NO animated:YES];
 }
 
 /// An empty query restores the full list; otherwise every script whose name contains the text (case-insensitive)

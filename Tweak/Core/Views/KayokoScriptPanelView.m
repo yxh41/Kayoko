@@ -9,6 +9,7 @@
 #import "KayokoHeaderButtonStyle.h"
 #import "KayokoHeaderView.h"
 #import "KayokoPasteboardManager.h"
+#import "KayokoSearchBar.h"
 
 static CGFloat const kKayokoScriptPanelVerticalFadeHeight = 24;
 static CGFloat const kKayokoScriptPanelFooterHorizontalInset = 16;
@@ -66,12 +67,14 @@ NS_ASSUME_NONNULL_END
 
         // Search lives directly under the header (not in the sliding container) so it stays put while the list
         // scrolls beneath it; it is collapsed out of the layout unless the panel controller asks for it.
-        _searchBar = [[UISearchBar alloc] init];
+        // The history/favorites search uses KayokoSearchBar with a cleared background, so the script panel does
+        // the same: identical chrome is the whole point of this class existing.
+        _searchBar = [[KayokoSearchBar alloc] initWithFrame:CGRectZero];
         [_searchBar setPlaceholder:KayokoScriptPanelLocalizedString(@"Search", @"Search")];
         [_searchBar setSearchBarStyle:UISearchBarStyleMinimal];
-        [_searchBar setTranslucent:NO];
-        [_searchBar setBackgroundColor:[UIColor clearColor]];
-        [_searchBar setBarTintColor:[UIColor clearColor]];
+        [_searchBar setBackgroundImage:[[UIImage alloc] init]];
+        [_searchBar setTintColor:[UIColor labelColor]];
+        [_searchBar setAlpha:0];
         [_searchBar setHidden:YES];
         [self addSubview:_searchBar];
 
@@ -86,6 +89,9 @@ NS_ASSUME_NONNULL_END
         [_tableView setRowHeight:52];
         [_tableView setEstimatedRowHeight:52];
         [_tableView setContentInsetAdjustmentBehavior:UIScrollViewContentInsetAdjustmentNever];
+        // The script list is usually shorter than the panel, so without this a pull-down would not even bounce and
+        // there would be no way to reveal the search bar.
+        [_tableView setAlwaysBounceVertical:YES];
         [_tableView setContentInset:UIEdgeInsetsMake(kKayokoScriptPanelListTopInset, 0,
                                                      kKayokoScriptPanelListBottomInset, 0)];
         [_transitionContentView addSubview:_tableView];
@@ -240,9 +246,36 @@ NS_ASSUME_NONNULL_END
 }
 
 - (void)setSearchBarVisible:(BOOL)visible {
-    [[self searchBarHeightConstraint] setConstant:visible ? 44.0 : 0.0];
-    [[self searchBar] setHidden:!visible];
-    [self layoutIfNeeded];
+    [self setSearchBarVisible:visible animated:NO];
+}
+
+- (void)setSearchBarVisible:(BOOL)visible animated:(BOOL)animated {
+    UISearchBar *searchBar = [self searchBar];
+    if (visible) {
+        [searchBar setHidden:NO];
+    }
+
+    void (^apply)(void) = ^{
+      [searchBar setAlpha:(visible ? 1.0 : 0.0)];
+      [[self searchBarHeightConstraint] setConstant:(visible ? 44.0 : 0.0)];
+      [self layoutIfNeeded];
+    };
+
+    if (!animated) {
+        apply();
+        [searchBar setHidden:!visible];
+        return;
+    }
+
+    [UIView animateWithDuration:0.22
+                          delay:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:apply
+                     completion:^(BOOL finished) {
+                       if (!visible) {
+                           [searchBar setHidden:YES];
+                       }
+                     }];
 }
 
 - (void)showList {

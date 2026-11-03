@@ -68,6 +68,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, strong, nullable) KayokoHeaderView *scriptPanelSourceHeaderView;
 @property(nonatomic, strong, nullable) KayokoPasteboardItem *scriptPanelSourceItem;
 @property(nonatomic, copy, nullable) NSString *scriptPanelSourceHistoryKey;
+/// While the script search is editing, the panel grows to full screen so the keyboard cannot hide the list. The
+/// original card frame is stashed so ending the search restores the exact geometry the drawer started from.
+@property(nonatomic, assign) BOOL scriptSearchFrameExpanded;
+@property(nonatomic, assign) CGRect scriptSearchRestoreFrame;
 @property(nonatomic, strong) KayokoWordSelectionViewController *wordSelectionViewController;
 @property(nonatomic, strong) KayokoNoteEditorViewController *noteEditorViewController;
 
@@ -110,6 +114,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) CGRect noteEditingOriginalPanelFrame;
 @property(nonatomic, assign) NSTimeInterval noteEditingKeyboardAnimationDuration;
 @property(nonatomic, assign) UIViewAnimationOptions noteEditingKeyboardAnimationOptions;
+
+- (void)restoreScriptSearchFrameAnimated:(BOOL)animated;
 @end
 
 NS_ASSUME_NONNULL_END
@@ -1966,6 +1972,10 @@ NS_ASSUME_NONNULL_END
         return;
     }
 
+    // If a search grew the card, shrink it back before hiding: the frame is shared with every other panel, so a
+    // leftover full-screen frame would make the next presentation open at the wrong size.
+    [self restoreScriptSearchFrameAnimated:NO];
+
     KayokoPreviewView *previewView = [[self previewViewController] previewView];
     UIView *sourceContentView = [self scriptPanelSourceContentView] ?: previewView;
     UIView *sourceTransitionView = [self scriptPanelSourceTransitionView] ?: [previewView transitionContentView];
@@ -2103,6 +2113,64 @@ NS_ASSUME_NONNULL_END
                                              allowsAutomaticPaste:YES];
     [[self panelPresentationController] prepareStandardDismissAnimation];
     [self hideAfterDirectPaste];
+}
+
+- (void)scriptPanelControllerDidBeginSearching:(KayokoScriptPanelController *)controller {
+    (void)controller;
+    UIView *mainView = [self mainView];
+    UIView *superview = [mainView superview];
+    if (!mainView || !superview || [self scriptSearchFrameExpanded]) {
+        return;
+    }
+
+    [self setScriptSearchRestoreFrame:[mainView frame]];
+    [self setScriptSearchFrameExpanded:YES];
+    CGRect fullscreenFrame = [superview bounds];
+    [UIView animateWithDuration:0.35
+                          delay:0
+         usingSpringWithDamping:0.86
+          initialSpringVelocity:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+                       [mainView setFrame:fullscreenFrame];
+                     }
+                     completion:nil];
+}
+
+- (void)scriptPanelControllerDidEndSearching:(KayokoScriptPanelController *)controller {
+    (void)controller;
+    [self restoreScriptSearchFrameAnimated:YES];
+}
+
+/// Restores the card geometry after a script search. Called both when the search ends and when the panel hides,
+/// so the next presentation never inherits a full-screen frame left behind by a cancelled search.
+- (void)restoreScriptSearchFrameAnimated:(BOOL)animated {
+    if (![self scriptSearchFrameExpanded]) {
+        return;
+    }
+
+    CGRect restoreFrame = [self scriptSearchRestoreFrame];
+    [self setScriptSearchFrameExpanded:NO];
+    [self setScriptSearchRestoreFrame:CGRectZero];
+    UIView *mainView = [self mainView];
+    if (CGRectIsEmpty(restoreFrame) || !mainView) {
+        return;
+    }
+
+    if (!animated) {
+        [mainView setFrame:restoreFrame];
+        return;
+    }
+
+    [UIView animateWithDuration:0.35
+                          delay:0
+         usingSpringWithDamping:0.9
+          initialSpringVelocity:0
+                        options:UIViewAnimationOptionCurveEaseOut
+                     animations:^{
+                       [mainView setFrame:restoreFrame];
+                     }
+                     completion:nil];
 }
 
 #pragma mark - KayokoClearConfirmationViewControllerDelegate
