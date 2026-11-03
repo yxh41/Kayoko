@@ -32,6 +32,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign, readonly) BOOL hasSelectedText;
 @property(nonatomic, copy, nullable) void (^selectionChangedHandler)(void);
 @property(nonatomic, copy, nullable) void (^tagAssignmentHandler)(KayokoPasteboardItem *item, NSString *historyKey);
+/// Called when the user taps the script button. The text is the current selection when there is one,
+/// otherwise the whole item content.
+@property(nonatomic, copy, nullable) void (^scriptButtonHandler)(NSString *text, NSString *historyKey);
 
 - (instancetype)initWithName:(NSString *)name NS_DESIGNATED_INITIALIZER;
 - (instancetype)initWithNibName:(nullable NSString *)nibNameOrNil

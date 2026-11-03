@@ -100,9 +100,8 @@ NS_ASSUME_NONNULL_END
     [[headerView trailingButton] setEnabled:YES];
     [[headerView trailingButton] setAlpha:1.0];
 
-    // The alternate slot sits left of the primary action and is unused everywhere else, so the script entry
-    // costs no extra layout work.
-    UIButton *scriptButton = [headerView alternateTrailingButton];
+    // Same slot as the word selection panel uses, so the entry keeps one position across both panels.
+    UIButton *scriptButton = [headerView scriptButton];
     [headerView updateStyleForButton:scriptButton
                        withImageName:@"wand.and.stars"
                            imageSize:kKayokoBackButtonImageSize

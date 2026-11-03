@@ -21,6 +21,7 @@ static CGFloat const kKayokoTrailingHeaderButtonCenterSpacing = 44;
 @property(nonatomic, strong, readwrite) UIButton *leadingButton;
 @property(nonatomic, strong, readwrite) UIButton *trailingButton;
 @property(nonatomic, strong, readwrite) UIButton *alternateTrailingButton;
+@property(nonatomic, strong, readwrite) UIButton *scriptButton;
 
 @end
 
@@ -64,6 +65,13 @@ static CGFloat const kKayokoTrailingHeaderButtonCenterSpacing = 44;
         [self addSubview:_titleTapControl];
         [_titleTapControl setTranslatesAutoresizingMaskIntoConstraints:NO];
 
+        // Added after the title tap control on purpose: the tap control stretches up to the alternate slot,
+        // so the third button has to sit above it to receive touches in its own strip.
+        _scriptButton = [[UIButton alloc] init];
+        [_scriptButton setHidden:YES];
+        [self addSubview:_scriptButton];
+        [_scriptButton setTranslatesAutoresizingMaskIntoConstraints:NO];
+
         [NSLayoutConstraint activateConstraints:@[
             [[_grabber topAnchor] constraintEqualToAnchor:[self topAnchor] constant:12],
             [[_grabber centerXAnchor] constraintEqualToAnchor:[self centerXAnchor]],
@@ -80,6 +88,9 @@ static CGFloat const kKayokoTrailingHeaderButtonCenterSpacing = 44;
             [[_alternateTrailingButton centerXAnchor]
                 constraintEqualToAnchor:[_trailingButton centerXAnchor]
                                constant:-kKayokoTrailingHeaderButtonCenterSpacing],
+            [[_scriptButton centerYAnchor] constraintEqualToAnchor:[_leadingButton centerYAnchor]],
+            [[_scriptButton centerXAnchor] constraintEqualToAnchor:[_alternateTrailingButton centerXAnchor]
+                                                          constant:-kKayokoTrailingHeaderButtonCenterSpacing],
             [[_titleTapControl leadingAnchor] constraintEqualToAnchor:[_titleLabel leadingAnchor]],
             [[_titleTapControl trailingAnchor] constraintEqualToAnchor:[_alternateTrailingButton leadingAnchor]
                                                               constant:-kKayokoTitleTapControlTrailingSpacing],

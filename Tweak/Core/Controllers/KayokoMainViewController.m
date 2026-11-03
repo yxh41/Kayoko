@@ -63,6 +63,11 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, strong) KayokoClearConfirmationViewController *clearConfirmationViewController;
 @property(nonatomic, strong) KayokoPreviewViewController *previewViewController;
 @property(nonatomic, strong) KayokoScriptPanelController *scriptPanelController;
+@property(nonatomic, strong, nullable) UIView *scriptPanelSourceContentView;
+@property(nonatomic, strong, nullable) UIView *scriptPanelSourceTransitionView;
+@property(nonatomic, strong, nullable) KayokoHeaderView *scriptPanelSourceHeaderView;
+@property(nonatomic, strong, nullable) KayokoPasteboardItem *scriptPanelSourceItem;
+@property(nonatomic, copy, nullable) NSString *scriptPanelSourceHistoryKey;
 @property(nonatomic, strong) KayokoWordSelectionViewController *wordSelectionViewController;
 @property(nonatomic, strong) KayokoNoteEditorViewController *noteEditorViewController;
 
@@ -231,6 +236,9 @@ NS_ASSUME_NONNULL_END
         [_wordSelectionViewController setDelegate:self];
         [_wordSelectionViewController setTagAssignmentHandler:^(KayokoPasteboardItem *item, NSString *historyKey) {
           [weakSelf handleTagAssignmentForItem:item historyKey:historyKey];
+        }];
+        [_wordSelectionViewController setScriptButtonHandler:^(NSString *text, NSString *historyKey) {
+          [weakSelf showScriptPanelFromWordSelectionWithText:text historyKey:historyKey];
         }];
         [self addChildViewController:_wordSelectionViewController];
         KayokoHeaderView *wordSelectionHeaderView = [[_wordSelectionViewController wordSelectionView] headerView];
@@ -1888,33 +1896,68 @@ NS_ASSUME_NONNULL_END
 }
 
 - (void)showScriptPanelForItem:(KayokoPasteboardItem *)item historyKey:(NSString *)historyKey {
-    (void)historyKey;
+    [self showScriptPanelWithText:[item content] ?: @""
+                sourceContentView:[[self previewViewController] previewView]
+             sourceTransitionView:[[[self previewViewController] previewView] transitionContentView]
+                 sourceHeaderView:[[[self previewViewController] previewView] headerView]
+                             item:item
+                       historyKey:historyKey];
+}
+
+- (void)showScriptPanelFromWordSelectionWithText:(NSString *)text historyKey:(NSString *)historyKey {
+    [self showScriptPanelWithText:text
+                sourceContentView:[[self wordSelectionViewController] view]
+             sourceTransitionView:[[[self wordSelectionViewController] wordSelectionView] transitionContentView]
+                 sourceHeaderView:[[[self wordSelectionViewController] wordSelectionView] headerView]
+                             item:[[self wordSelectionViewController] sourceItem]
+                       historyKey:historyKey];
+}
+
+- (void)showScriptPanelWithText:(NSString *)text
+              sourceContentView:(UIView *)sourceContentView
+           sourceTransitionView:(UIView *)sourceTransitionView
+               sourceHeaderView:(KayokoHeaderView *)sourceHeaderView
+                           item:(nullable KayokoPasteboardItem *)item
+                     historyKey:(nullable NSString *)historyKey {
     if ([[self panelPresentationController] isAnimating] || [[self mainView] isAnimating]) {
         return;
     }
-
-    KayokoPreviewView *previewView = [[self previewViewController] previewView];
-    if ([previewView isHidden]) {
+    if (!sourceContentView || [sourceContentView isHidden] || !sourceHeaderView) {
         return;
     }
 
     KayokoScriptPanelView *scriptPanelView = [[self scriptPanelController] panelView];
-    [[self scriptPanelController] beginWithText:[item content] ?: @""];
+    [[self scriptPanelController] beginWithText:text ?: @""];
     [scriptPanelView setHidden:NO];
+
+    // Remember which panel opened us: the back button has to unwind to it, not always to the preview.
+    [self setScriptPanelSourceContentView:sourceContentView];
+    [self setScriptPanelSourceTransitionView:sourceTransitionView];
+    [self setScriptPanelSourceHeaderView:sourceHeaderView];
+    [self setScriptPanelSourceItem:item];
+    [self setScriptPanelSourceHistoryKey:historyKey];
 
     KayokoHeaderView *mainHeaderView = [[self mainView] headerView];
     [[scriptPanelView headerView] setGrabberFoldProgress:[mainHeaderView grabberFoldProgress]];
     [[scriptPanelView headerView] setHidden:NO];
-    [[previewView headerView] setHidden:YES];
+    [sourceHeaderView setHidden:YES];
 
     [[self mainView] showContentView:scriptPanelView
                    transitioningView:[scriptPanelView transitionContentView]
-                     hideContentView:previewView
-                   transitioningView:[previewView transitionContentView]
+                     hideContentView:sourceContentView
+                   transitioningView:sourceTransitionView
                            direction:KayokoContentTransitionDirectionForward
                  alongsideAnimations:nil
                           completion:nil];
     [[self panelPresentationController] triggerHapticFeedbackWithStyle:UIImpactFeedbackStyleMedium];
+}
+
+- (void)resetScriptPanelSourceState {
+    [self setScriptPanelSourceContentView:nil];
+    [self setScriptPanelSourceTransitionView:nil];
+    [self setScriptPanelSourceHeaderView:nil];
+    [self setScriptPanelSourceItem:nil];
+    [self setScriptPanelSourceHistoryKey:nil];
 }
 
 - (void)hideScriptPanel {
@@ -1924,17 +1967,22 @@ NS_ASSUME_NONNULL_END
     }
 
     KayokoPreviewView *previewView = [[self previewViewController] previewView];
-    [[previewView headerView] setHidden:NO];
+    UIView *sourceContentView = [self scriptPanelSourceContentView] ?: previewView;
+    UIView *sourceTransitionView = [self scriptPanelSourceTransitionView] ?: [previewView transitionContentView];
+    KayokoHeaderView *sourceHeaderView = [self scriptPanelSourceHeaderView] ?: [previewView headerView];
+
+    [sourceHeaderView setHidden:NO];
     [[scriptPanelView headerView] setHidden:YES];
 
-    [[self mainView] showContentView:previewView
-        transitioningView:[previewView transitionContentView]
+    [[self mainView] showContentView:sourceContentView
+        transitioningView:sourceTransitionView
         hideContentView:scriptPanelView
         transitioningView:[scriptPanelView transitionContentView]
         direction:KayokoContentTransitionDirectionBackward
         alongsideAnimations:nil
         completion:^{
           [[self scriptPanelController] resetState];
+          [self resetScriptPanelSourceState];
           [[scriptPanelView headerView] setHidden:NO];
         }];
 }
@@ -2025,7 +2073,7 @@ NS_ASSUME_NONNULL_END
 
 - (void)scriptPanelController:(KayokoScriptPanelController *)controller didRequestCopyText:(NSString *)text {
     (void)controller;
-    KayokoPasteboardItem *sourceItem = [[self previewViewController] previewItem];
+    KayokoPasteboardItem *sourceItem = [self scriptPanelSourceItem] ?: [[self previewViewController] previewItem];
     if (!sourceItem || [text length] == 0) {
         return;
     }
@@ -2040,7 +2088,7 @@ NS_ASSUME_NONNULL_END
 
 - (void)scriptPanelController:(KayokoScriptPanelController *)controller didRequestPasteText:(NSString *)text {
     (void)controller;
-    KayokoPasteboardItem *sourceItem = [[self previewViewController] previewItem];
+    KayokoPasteboardItem *sourceItem = [self scriptPanelSourceItem] ?: [[self previewViewController] previewItem];
     if (!sourceItem || [text length] == 0) {
         return;
     }
@@ -2050,7 +2098,8 @@ NS_ASSUME_NONNULL_END
                                                                         withImageNamed:nil];
     [[KayokoPasteboardManager sharedInstance] writePasteboardItem:item
                                                 sourceHistoryItem:sourceItem
-                                               fromHistoryWithKey:[self effectiveActiveHistoryKey]
+                                               fromHistoryWithKey:([self scriptPanelSourceHistoryKey] ?:
+                                                                   [self effectiveActiveHistoryKey])
                                              allowsAutomaticPaste:YES];
     [[self panelPresentationController] prepareStandardDismissAnimation];
     [self hideAfterDirectPaste];
@@ -2241,6 +2290,7 @@ NS_ASSUME_NONNULL_END
     [[self wordSelectionViewController] resetWordSelectionState];
     [[self scriptPanelController] resetState];
     [[[self scriptPanelController] panelView] setHidden:YES];
+    [self resetScriptPanelSourceState];
     [self resetNoteEditingState];
     [self setActiveSourceContentView:nil];
     [self setDismissingPanel:NO];

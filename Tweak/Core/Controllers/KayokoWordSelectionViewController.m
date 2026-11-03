@@ -59,6 +59,9 @@ NS_ASSUME_NONNULL_END
                    addTarget:self
                       action:@selector(handleSelectionOrderButtonPressed)
             forControlEvents:UIControlEventTouchUpInside];
+        [[[_wordSelectionView headerView] scriptButton] addTarget:self
+                                                          action:@selector(handleScriptButtonPressed)
+                                                forControlEvents:UIControlEventTouchUpInside];
         _actionHandler = [[KayokoHistoryItemActionHandler alloc] init];
         [self setView:_wordSelectionView];
 
@@ -136,6 +139,11 @@ NS_ASSUME_NONNULL_END
         setAccessibilityLabel:[[KayokoPasteboardManager localizationBundle] localizedStringForKey:@"Selection Order"
                                                                                             value:nil
                                                                                             table:@"Tweak"]];
+    [[headerView scriptButton] setAccessibilityLabel:[[KayokoPasteboardManager localizationBundle]
+                                                         localizedStringForKey:@"Scripts"
+                                                                         value:@"Scripts"
+                                                                         table:@"Tweak"]];
+    [self updateScriptButtonState];
     [self updateSelectionOrderButtonState];
     [self updateActionButtonState];
 }
@@ -241,6 +249,7 @@ NS_ASSUME_NONNULL_END
 
 - (void)resetWordSelectionState {
     [[self wordSelectionView] setHidden:YES];
+    [[[[self wordSelectionView] headerView] scriptButton] setHidden:YES];
     [[self wordSelectionView] reset];
     [self setSourceItem:nil];
     [self setSourceHistoryKey:nil];
@@ -253,6 +262,38 @@ NS_ASSUME_NONNULL_END
     UIButton *actionButton = [[[self wordSelectionView] headerView] trailingButton];
     [actionButton setEnabled:enabled];
     [actionButton setAlpha:enabled ? 1.0 : 0.35];
+}
+
+- (void)updateScriptButtonState {
+    KayokoHeaderView *headerView = [[self wordSelectionView] headerView];
+    UIButton *scriptButton = [headerView scriptButton];
+    NSString *content = [[self sourceItem] content];
+    BOOL hasText = [kayokoWordSelectionTextByTrimmingBoundaryNewlines(content) length] > 0;
+
+    [headerView updateStyleForButton:scriptButton
+                       withImageName:@"wand.and.stars"
+                           imageSize:kKayokoBackButtonImageSize
+                           tintColor:[UIColor labelColor]];
+    // Scripts always run on something, so the entry stays tappable whenever the item carries text; the
+    // selection only decides which slice of it is handed over.
+    [scriptButton setEnabled:hasText];
+    [scriptButton setAlpha:hasText ? 1.0 : 0.35];
+    [scriptButton setHidden:!hasText];
+}
+
+- (void)handleScriptButtonPressed {
+    NSString *text = [self selectedText];
+    if ([text length] == 0) {
+        text = kayokoWordSelectionTextByTrimmingBoundaryNewlines([[self sourceItem] content]);
+    }
+
+    void (^handler)(NSString *, NSString *) = [self scriptButtonHandler];
+    if ([text length] == 0 || !handler) {
+        return;
+    }
+
+    [[self delegate] wordSelectionViewController:self triggerHapticFeedbackWithStyle:UIImpactFeedbackStyleLight];
+    handler(text, [self sourceHistoryKey]);
 }
 
 - (void)updateSelectionOrderButtonState {

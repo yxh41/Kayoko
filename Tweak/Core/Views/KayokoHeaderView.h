@@ -19,6 +19,9 @@ static CGFloat const kKayokoHeaderContentSpacing = 8;
 @property(nonatomic, strong, readonly) UIButton *leadingButton;
 @property(nonatomic, strong, readonly) UIButton *trailingButton;
 @property(nonatomic, strong, readonly) UIButton *alternateTrailingButton;
+/// Third trailing slot, left of the alternate one. Hidden unless a content view opts in, so panels that
+/// only use the two original slots keep their exact layout.
+@property(nonatomic, strong, readonly) UIButton *scriptButton;
 @property(nonatomic, assign) CGFloat grabberFoldProgress;
 
 + (CGFloat)preferredHeight;
