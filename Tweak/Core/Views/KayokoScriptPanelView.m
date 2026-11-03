@@ -35,6 +35,8 @@ static NSString *KayokoScriptPanelLocalizedString(NSString *key, NSString *fallb
 @property(nonatomic, strong, readwrite) UIButton *resultPasteButton;
 @property(nonatomic, strong, readwrite) UILabel *noticeLabel;
 @property(nonatomic, strong) UIStackView *footerStackView;
+/// What the copy button says when the page is a real result rather than a failure report.
+@property(nonatomic, copy) NSString *defaultCopyTitle;
 
 @end
 
@@ -111,6 +113,7 @@ NS_ASSUME_NONNULL_END
                                            weight:UIFontWeightMedium];
         _resultPasteButton = [self footerButtonWithTitle:KayokoScriptPanelLocalizedString(@"Paste", @"Paste")
                                             weight:UIFontWeightSemibold];
+        [self setDefaultCopyTitle:KayokoScriptPanelLocalizedString(@"Copy", @"Copy")];
 
         UIStackView *buttonStackView =
             [[UIStackView alloc] initWithArrangedSubviews:@[ _resultCopyButton, _resultPasteButton ]];
@@ -221,10 +224,26 @@ NS_ASSUME_NONNULL_END
 }
 
 - (void)showResultWithText:(NSString *)text countText:(nullable NSString *)countText {
+    // The failure page hides the paste button and renames the copy one, so both are put back before a real
+    // result is shown.
+    [[self resultPasteButton] setHidden:NO];
+    [[self resultCopyButton] setTitle:[self defaultCopyTitle] forState:UIControlStateNormal];
     [[self resultTextView] setText:text ?: @""];
     [[self resultTextView] setContentOffset:CGPointZero animated:NO];
     [[self resultCountLabel] setText:countText];
     [[self resultCountLabel] setHidden:([countText length] == 0)];
+    [[self resultView] setHidden:NO];
+    [[self tableView] setHidden:YES];
+    [self showNotice:nil];
+}
+
+- (void)showFailureWithText:(NSString *)text copyTitle:(NSString *)copyTitle {
+    [[self resultPasteButton] setHidden:YES];
+    [[self resultCopyButton] setTitle:copyTitle forState:UIControlStateNormal];
+    [[self resultTextView] setText:text ?: @""];
+    [[self resultTextView] setContentOffset:CGPointZero animated:NO];
+    [[self resultCountLabel] setText:nil];
+    [[self resultCountLabel] setHidden:YES];
     [[self resultView] setHidden:NO];
     [[self tableView] setHidden:YES];
     [self showNotice:nil];

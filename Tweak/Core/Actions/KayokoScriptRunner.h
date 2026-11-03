@@ -6,12 +6,12 @@
 #import <Foundation/Foundation.h>
 
 @class KayokoScript;
+@class KayokoScriptFailure;
 
 NS_ASSUME_NONNULL_BEGIN
 
 typedef void (^KayokoScriptRunnerCompletion)(NSArray<NSString *> *_Nullable results,
-                                             NSString *_Nullable errorCode,
-                                             NSString *_Nullable errorMessage);
+                                             KayokoScriptFailure *_Nullable failure);
 
 /// Runs `kayoko_script` out of process. JavaScriptCore has no interrupt API, so a hung script can only be
 /// stopped by killing its process, which means the runner must never evaluate user code in-process.

@@ -9,6 +9,7 @@
 #import "KayokoHUD.h"
 #import "KayokoPasteboardManager.h"
 #import "KayokoScript.h"
+#import "KayokoScriptFailure.h"
 #import "KayokoScriptListCell.h"
 #import "KayokoScriptPanelView.h"
 #import "KayokoScriptRunner.h"
@@ -18,6 +19,7 @@ typedef NS_ENUM(NSUInteger, KayokoScriptPanelState) {
     KayokoScriptPanelStateList,
     KayokoScriptPanelStateChoices,
     KayokoScriptPanelStateResult,
+    KayokoScriptPanelStateFailure,
 };
 
 static NSString *const kKayokoScriptPanelCellReuseIdentifier = @"KayokoScriptListCell";
@@ -160,8 +162,7 @@ NS_ASSUME_NONNULL_END
     __weak typeof(self) weakSelf = self;
     [[self runner] runScript:script
                        input:[self inputText]
-                  completion:^(NSArray<NSString *> *_Nullable results, NSString *_Nullable errorCode,
-                               NSString *_Nullable errorMessage) {
+                  completion:^(NSArray<NSString *> *_Nullable results, KayokoScriptFailure *_Nullable failure) {
                     __strong typeof(weakSelf) strongSelf = weakSelf;
                     if (!strongSelf) {
                         return;
@@ -175,9 +176,8 @@ NS_ASSUME_NONNULL_END
                     [strongSelf setRunning:NO];
                     [strongSelf updateTableInteraction];
 
-                    if ([errorCode length] > 0) {
-                        [KayokoHUD showTransientStatus:[strongSelf messageForErrorCode:errorCode
-                                                                             fallback:errorMessage]];
+                    if (failure) {
+                        [strongSelf showFailureStateWithFailure:failure];
                         return;
                     }
                     if ([results count] == 0) {
@@ -203,25 +203,151 @@ NS_ASSUME_NONNULL_END
     [[[self panelView] tableView] setAlpha:([self isRunning] ? 0.55 : 1.0)];
 }
 
-- (NSString *)messageForErrorCode:(nullable NSString *)code fallback:(nullable NSString *)fallback {
-    NSString *localizationKey = nil;
+#pragma mark - Failure
+
+- (void)showFailureStateWithFailure:(KayokoScriptFailure *)failure {
+    [self setState:KayokoScriptPanelStateFailure];
+    [[self panelView] setTitleText:[self activeScriptTitle]];
+    NSString *report = [self reportForFailure:failure];
+    // The failure page hides the paste button, so stashing the report here is enough to make the copy button work.
+    [self setResultText:report];
+    [[self panelView] showFailureWithText:report
+                                copyTitle:KayokoScriptPanelLocalized(@"Copy error", @"Copy error")];
+}
+
+/// The page a failed run lands on. It answers three questions in the order they get asked: what went wrong,
+/// which line, and what the script printed before it did.
+- (NSString *)reportForFailure:(KayokoScriptFailure *)failure {
+    NSMutableArray<NSString *> *sections = [NSMutableArray array];
+
+    NSString *headline = [self headlineForFailure:failure];
+    if ([headline length] > 0) {
+        [sections addObject:headline];
+    }
+
+    // Left as the engine wrote it: this sentence comes from JavaScriptCore and names the actual mistake, which
+    // no translation of ours would.
+    NSString *message = [failure message];
+    if ([message length] > 0 && ![message isEqualToString:headline]) {
+        [sections addObject:message];
+    }
+
+    NSString *sourceLine = [failure sourceLine];
+    if ([sourceLine length] > 0) {
+        [sections addObject:[NSString
+                                stringWithFormat:@"%@\n%@",
+                                                 KayokoScriptPanelLocalized(@"Offending line", @"Offending line"),
+                                                 sourceLine]];
+    }
+
+    NSArray<NSString *> *logs = [failure logs];
+    if ([logs count] > 0) {
+        [sections addObject:[NSString
+                                stringWithFormat:@"%@\n%@",
+                                                 KayokoScriptPanelLocalized(@"Console output", @"Console output"),
+                                                 [logs componentsJoinedByString:@"\n"]]];
+    }
+
+    return [sections componentsJoinedByString:@"\n\n"];
+}
+
+- (NSString *)headlineForFailure:(KayokoScriptFailure *)failure {
+    NSString *code = [failure code];
+    NSInteger line = [failure line];
+
+    if ([code isEqualToString:@"exception"]) {
+        if ([[failure stage] isEqualToString:@"compile"]) {
+            if (line > 0) {
+                return [NSString
+                    stringWithFormat:KayokoScriptPanelLocalized(@"Syntax error on line %ld",
+                                                                @"Syntax error on line %ld"),
+                                     (long)line];
+            }
+            return KayokoScriptPanelLocalized(@"Syntax error in the script", @"Syntax error in the script");
+        }
+        if (line > 0) {
+            return [NSString
+                stringWithFormat:KayokoScriptPanelLocalized(@"Failed on line %ld", @"Failed on line %ld"),
+                                 (long)line];
+        }
+        return KayokoScriptPanelLocalized(@"Script failed while running", @"Script failed while running");
+    }
+
+    if ([code isEqualToString:@"no-main"]) {
+        return KayokoScriptPanelLocalized(@"Script is missing a main(text) function",
+                                          @"Script is missing a main(text) function");
+    }
+
     if ([code isEqualToString:@"timeout"]) {
-        localizationKey = @"Script timed out";
-    } else if ([code isEqualToString:@"no-main"]) {
-        localizationKey = @"Script is missing a main(text) function";
-    } else if ([code isEqualToString:@"missing-executor"] || [code isEqualToString:@"spawn-failed"]) {
-        localizationKey = @"Script runner is unavailable";
-    } else if ([code isEqualToString:@"too-many-results"] || [code isEqualToString:@"result-too-large"]) {
-        localizationKey = @"Script returned too much text";
-    } else if ([code isEqualToString:@"bad-result-type"]) {
-        localizationKey = @"Script returned an unsupported value";
+        NSNumber *seconds = [failure numberForKey:@"seconds"];
+        return [NSString
+            stringWithFormat:KayokoScriptPanelLocalized(@"Stopped after %g seconds", @"Stopped after %g seconds"),
+                             seconds ? [seconds doubleValue] : 5.0];
     }
 
-    if ([localizationKey length] > 0) {
-        return KayokoScriptPanelLocalized(localizationKey, localizationKey);
+    if ([code isEqualToString:@"bad-result-type"]) {
+        NSString *type = [failure stringForKey:@"type"];
+        NSNumber *index = [failure numberForKey:@"index"];
+        if (index) {
+            return [NSString
+                stringWithFormat:KayokoScriptPanelLocalized(@"Item %ld is %@, expected text",
+                                                            @"Item %ld is %@, expected text"),
+                                 (long)[index integerValue], type ?: @"?"];
+        }
+        return [NSString
+            stringWithFormat:KayokoScriptPanelLocalized(@"Returned %@, expected text or a list of texts",
+                                                        @"Returned %@, expected text or a list of texts"),
+                             type ?: @"?"];
     }
 
-    return [fallback length] > 0 ? fallback : KayokoScriptPanelLocalized(@"Script failed", @"Script failed");
+    if ([code isEqualToString:@"too-many-results"]) {
+        NSNumber *count = [failure numberForKey:@"count"];
+        NSNumber *limit = [failure numberForKey:@"limit"];
+        return [NSString
+            stringWithFormat:KayokoScriptPanelLocalized(@"Returned %ld results, the limit is %ld",
+                                                        @"Returned %ld results, the limit is %ld"),
+                             (long)[count integerValue], (long)[limit integerValue]];
+    }
+
+    if ([code isEqualToString:@"result-too-large"]) {
+        NSNumber *length = [failure numberForKey:@"length"];
+        NSNumber *limit = [failure numberForKey:@"limit"];
+        return [NSString
+            stringWithFormat:KayokoScriptPanelLocalized(@"Result is %ld characters, the limit is %ld",
+                                                        @"Result is %ld characters, the limit is %ld"),
+                             (long)[length integerValue], (long)[limit integerValue]];
+    }
+
+    if ([code isEqualToString:@"input-too-large"]) {
+        NSNumber *limit = [failure numberForKey:@"limit"];
+        return [NSString
+            stringWithFormat:KayokoScriptPanelLocalized(@"Input is larger than %ld bytes",
+                                                        @"Input is larger than %ld bytes"),
+                             (long)[limit integerValue]];
+    }
+
+    if ([code isEqualToString:@"missing-executor"]) {
+        return KayokoScriptPanelLocalized(@"Script runner is unavailable", @"Script runner is unavailable");
+    }
+
+    if ([code isEqualToString:@"spawn-failed"]) {
+        NSNumber *status = [failure numberForKey:@"status"];
+        return [NSString
+            stringWithFormat:KayokoScriptPanelLocalized(@"Unable to start the script runner (%d)",
+                                                        @"Unable to start the script runner (%d)"),
+                             (int)[status intValue]];
+    }
+
+    if ([code isEqualToString:@"runner-failed"]) {
+        return KayokoScriptPanelLocalized(@"The script runner stopped unexpectedly",
+                                          @"The script runner stopped unexpectedly");
+    }
+
+    if ([code isEqualToString:@"invalid-request"]) {
+        return KayokoScriptPanelLocalized(@"Script request was rejected", @"Script request was rejected");
+    }
+
+    return KayokoScriptPanelLocalized(@"Script failed", @"Script failed");
 }
 
 #pragma mark - Actions
@@ -240,6 +366,9 @@ NS_ASSUME_NONNULL_END
         }
         break;
     case KayokoScriptPanelStateChoices:
+        [self showListState];
+        break;
+    case KayokoScriptPanelStateFailure:
         [self showListState];
         break;
     case KayokoScriptPanelStateList:

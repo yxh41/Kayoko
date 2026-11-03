@@ -62,8 +62,18 @@ static void kayokoEmitResults(NSArray<NSString *> *results) {
     kayokoEmitPayload(@{@"results" : results ?: @[]});
 }
 
-static void kayokoEmitError(NSString *code, NSString *message) {
-    kayokoEmitPayload(@{@"error" : message ?: @"Script failed", @"code" : code ?: @"failure"});
+/// Extra keys ride along with the error so the panel can explain the failure instead of repeating it: the line
+/// a script broke on, the type it returned, the limit it crossed.
+static void kayokoEmitError(NSString *code, NSString *message, NSDictionary<NSString *, id> *extra) {
+    NSMutableDictionary<NSString *, id> *payload =
+        [@{@"error" : message ?: @"Script failed", @"code" : code ?: @"failure"} mutableCopy];
+    for (NSString *key in extra) {
+        id value = [extra objectForKey:key];
+        if (value) {
+            [payload setObject:value forKey:key];
+        }
+    }
+    kayokoEmitPayload(payload);
 }
 
 #pragma mark - Watchdog
@@ -86,7 +96,8 @@ static void *kayokoWatchdogMain(void *context) {
             return NULL;
         }
 
-        kayokoEmitError(@"timeout", @"Script timed out");
+        kayokoEmitError(@"timeout", @"Script timed out",
+                        @{@"seconds" : @(timeout), @"stage" : @"run"});
         _exit(1);
     }
 }
@@ -137,7 +148,90 @@ static NSString *kayokoDescribeException(JSContext *context) {
     return [message length] > 0 ? message : @"Script error";
 }
 
-static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value, NSString **errorCode, NSString **errorMessage) {
+static NSInteger kayokoExceptionInteger(JSValue *exception, NSString *key) {
+    JSValue *value = [exception valueForProperty:key];
+    if (![value isNumber]) {
+        return 0;
+    }
+
+    NSInteger number = (NSInteger)[value toInt32];
+    return number > 0 ? number : 0;
+}
+
+/// The user wrote the line, so showing it back is worth more than any wording this side can invent.
+static NSString *kayokoSourceLineAt(NSString *code, NSInteger line) {
+    if (line <= 0) {
+        return nil;
+    }
+
+    NSArray<NSString *> *lines = [code componentsSeparatedByString:@"\n"];
+    if ((NSUInteger)line > [lines count]) {
+        return nil;
+    }
+
+    NSString *text = [lines[(NSUInteger)line - 1]
+        stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+    if ([text length] > 200) {
+        text = [[text substringToIndex:200] stringByAppendingString:@"…"];
+    }
+
+    return [text length] > 0 ? text : nil;
+}
+
+/// Where a script broke: which stage, which line, and the line itself.
+static NSDictionary<NSString *, id> *kayokoExceptionDetails(JSContext *context,
+                                                           NSString *stage,
+                                                           NSString *code) {
+    JSValue *exception = [context exception];
+    if (!exception || [exception isUndefined] || [exception isNull]) {
+        return @{@"stage" : stage};
+    }
+
+    NSInteger line = kayokoExceptionInteger(exception, @"line");
+    NSInteger column = kayokoExceptionInteger(exception, @"column");
+
+    NSMutableDictionary<NSString *, id> *details = [@{@"stage" : stage} mutableCopy];
+    if (line > 0) {
+        [details setObject:@(line) forKey:@"line"];
+    }
+    if (column > 0) {
+        [details setObject:@(column) forKey:@"column"];
+    }
+
+    NSString *sourceLine = kayokoSourceLineAt(code, line);
+    if ([sourceLine length] > 0) {
+        [details setObject:sourceLine forKey:@"source"];
+    }
+
+    return details;
+}
+
+static NSString *kayokoDescribeType(JSValue *value) {
+    if (!value || [value isUndefined]) {
+        return @"undefined";
+    }
+    if ([value isNull]) {
+        return @"null";
+    }
+    if ([value isArray]) {
+        return @"array";
+    }
+    if ([value isObject]) {
+        return @"object";
+    }
+    if ([value isNumber]) {
+        return @"number";
+    }
+    if ([value isBoolean]) {
+        return @"boolean";
+    }
+    return @"unknown";
+}
+
+static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value,
+                                                  NSString **errorCode,
+                                                  NSString **errorMessage,
+                                                  NSDictionary<NSString *, id> **errorExtra) {
     if (!value || [value isUndefined] || [value isNull]) {
         return @[];
     }
@@ -150,6 +244,11 @@ static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value, NSString **err
         if ([text length] > kKayokoScriptMaximumResultLength) {
             *errorCode = @"result-too-large";
             *errorMessage = @"Result is too large";
+            *errorExtra = @{
+                @"stage" : @"run",
+                @"length" : @([text length]),
+                @"limit" : @(kKayokoScriptMaximumResultLength),
+            };
             return nil;
         }
         return @[ text ];
@@ -158,6 +257,7 @@ static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value, NSString **err
     if (![value isArray]) {
         *errorCode = @"bad-result-type";
         *errorMessage = @"Expected text or a list of texts";
+        *errorExtra = @{@"stage" : @"run", @"type" : kayokoDescribeType(value)};
         return nil;
     }
 
@@ -170,6 +270,11 @@ static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value, NSString **err
         if ([results count] >= kKayokoScriptMaximumResults) {
             *errorCode = @"too-many-results";
             *errorMessage = @"Too many results";
+            *errorExtra = @{
+                @"stage" : @"run",
+                @"count" : @([results count]),
+                @"limit" : @(kKayokoScriptMaximumResults),
+            };
             return nil;
         }
 
@@ -177,6 +282,11 @@ static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value, NSString **err
         if (![element isString]) {
             *errorCode = @"bad-result-type";
             *errorMessage = @"Expected text or a list of texts";
+            *errorExtra = @{
+                @"stage" : @"run",
+                @"type" : kayokoDescribeType(element),
+                @"index" : @(index + 1),
+            };
             return nil;
         }
 
@@ -187,13 +297,24 @@ static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value, NSString **err
         if ([text length] > kKayokoScriptMaximumResultLength) {
             *errorCode = @"result-too-large";
             *errorMessage = @"Result is too large";
+            *errorExtra = @{
+                @"stage" : @"run",
+                @"index" : @(index + 1),
+                @"length" : @([text length]),
+                @"limit" : @(kKayokoScriptMaximumResultLength),
+            };
             return nil;
         }
 
         totalLength += [text length];
         if (totalLength > kKayokoScriptMaximumTotalLength) {
-            *errorCode = @"too-many-results";
-            *errorMessage = @"Too many results";
+            *errorCode = @"result-too-large";
+            *errorMessage = @"Too much text in total";
+            *errorExtra = @{
+                @"stage" : @"run",
+                @"length" : @(totalLength),
+                @"limit" : @(kKayokoScriptMaximumTotalLength),
+            };
             return nil;
         }
 
@@ -203,7 +324,11 @@ static NSArray<NSString *> *kayokoNormalizeResult(JSValue *value, NSString **err
     return results;
 }
 
-static NSArray<NSString *> *kayokoRunScript(NSString *code, NSString *input, NSString **errorCode, NSString **errorMessage) {
+static NSArray<NSString *> *kayokoRunScript(NSString *code,
+                                            NSString *input,
+                                            NSString **errorCode,
+                                            NSString **errorMessage,
+                                            NSDictionary<NSString *, id> **errorExtra) {
     JSContext *context = [[JSContext alloc] init];
 
     [context setObject:^(JSValue *message) {
@@ -225,8 +350,10 @@ static NSArray<NSString *> *kayokoRunScript(NSString *code, NSString *input, NSS
 
     [context evaluateScript:code];
     if ([context exception]) {
+        // The source itself was rejected, so there is no "while running" to speak of.
         *errorCode = @"exception";
         *errorMessage = kayokoDescribeException(context);
+        *errorExtra = kayokoExceptionDetails(context, @"compile", code);
         return nil;
     }
 
@@ -234,6 +361,7 @@ static NSArray<NSString *> *kayokoRunScript(NSString *code, NSString *input, NSS
     if (![isFunction toBool]) {
         *errorCode = @"no-main";
         *errorMessage = @"Missing main(text)";
+        *errorExtra = @{@"stage" : @"compile"};
         return nil;
     }
 
@@ -242,10 +370,11 @@ static NSArray<NSString *> *kayokoRunScript(NSString *code, NSString *input, NSS
     if ([context exception]) {
         *errorCode = @"exception";
         *errorMessage = kayokoDescribeException(context);
+        *errorExtra = kayokoExceptionDetails(context, @"run", code);
         return nil;
     }
 
-    return kayokoNormalizeResult(value, errorCode, errorMessage);
+    return kayokoNormalizeResult(value, errorCode, errorMessage, errorExtra);
 }
 
 #pragma mark - Entry Point
@@ -274,24 +403,25 @@ int main(int argc, char *argv[]) {
         NSData *input = kayokoReadAllFromDescriptor(STDIN_FILENO, kKayokoScriptMaximumInputBytes,
                                                     &inputExceededLimit);
         if (inputExceededLimit) {
-            kayokoEmitError(@"input-too-large", @"Input is too large");
+            kayokoEmitError(@"input-too-large", @"Input is too large",
+                            @{@"limit" : @(kKayokoScriptMaximumInputBytes)});
             return 1;
         }
         if ([input length] == 0) {
-            kayokoEmitError(@"invalid-request", @"Request is empty");
+            kayokoEmitError(@"invalid-request", @"Request is empty", nil);
             return 1;
         }
 
         NSDictionary *request = [NSJSONSerialization JSONObjectWithData:input options:0 error:NULL];
         if (![request isKindOfClass:[NSDictionary class]]) {
-            kayokoEmitError(@"invalid-request", @"Request is not a dictionary");
+            kayokoEmitError(@"invalid-request", @"Request is not a dictionary", nil);
             return 1;
         }
 
         id code = [request objectForKey:@"code"];
         id text = [request objectForKey:@"input"];
         if (![code isKindOfClass:[NSString class]] || [code length] == 0) {
-            kayokoEmitError(@"invalid-request", @"Missing code");
+            kayokoEmitError(@"invalid-request", @"Missing code", nil);
             return 1;
         }
         if (![text isKindOfClass:[NSString class]]) {
@@ -305,9 +435,10 @@ int main(int argc, char *argv[]) {
 
         NSString *errorCode = nil;
         NSString *errorMessage = nil;
-        NSArray<NSString *> *results = kayokoRunScript(code, text, &errorCode, &errorMessage);
+        NSDictionary<NSString *, id> *errorExtra = nil;
+        NSArray<NSString *> *results = kayokoRunScript(code, text, &errorCode, &errorMessage, &errorExtra);
         if (!results) {
-            kayokoEmitError(errorCode, errorMessage);
+            kayokoEmitError(errorCode, errorMessage, errorExtra);
             return 1;
         }
 

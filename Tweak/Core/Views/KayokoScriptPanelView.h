@@ -27,6 +27,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)setTitleText:(NSString *)title;
 - (void)showList;
 - (void)showResultWithText:(NSString *)text countText:(nullable NSString *)countText;
+/// The failure page reuses the result layout: the text is a diagnostic, and the only thing worth offering on a
+/// failed run is the ability to copy it somewhere the user can act on it.
+- (void)showFailureWithText:(NSString *)text copyTitle:(NSString *)copyTitle;
 - (void)showNotice:(nullable NSString *)notice;
 
 @end
