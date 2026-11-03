@@ -25,6 +25,16 @@ typedef NS_ENUM(NSUInteger, KayokoScriptPanelState) {
 
 static NSString *const kKayokoScriptPanelCellReuseIdentifier = @"KayokoScriptListCell";
 
+/// Under ARC a message to `id` has to have a known signature, so the two MobileCoreServices entry points this
+/// file uses are declared instead of being sent blindly.
+@protocol KayokoLSApplicationProxyClass <NSObject>
++ (id)applicationProxyForIdentifier:(NSString *)bundleIdentifier;
+@end
+
+@protocol KayokoLSApplicationProxy <NSObject>
+- (NSString *)localizedName;
+@end
+
 NS_ASSUME_NONNULL_BEGIN
 
 static NSString *KayokoScriptPanelLocalized(NSString *key, NSString *fallback) {
@@ -212,18 +222,19 @@ NS_ASSUME_NONNULL_END
         return nil;
     }
 
-    Class proxyClass = NSClassFromString(@"LSApplicationProxy");
+    Class<KayokoLSApplicationProxyClass> proxyClass =
+        (Class<KayokoLSApplicationProxyClass>)NSClassFromString(@"LSApplicationProxy");
     if (![proxyClass respondsToSelector:@selector(applicationProxyForIdentifier:)]) {
         return nil;
     }
 
-    id proxy = [(id)proxyClass applicationProxyForIdentifier:bundleIdentifier];
+    id<KayokoLSApplicationProxy> proxy = [proxyClass applicationProxyForIdentifier:bundleIdentifier];
     if (![proxy respondsToSelector:@selector(localizedName)]) {
         return nil;
     }
 
-    id name = [proxy localizedName];
-    return [name isKindOfClass:[NSString class]] && [name length] > 0 ? name : nil;
+    NSString *name = [proxy localizedName];
+    return [name length] > 0 ? name : nil;
 }
 
 - (NSString *)activeScriptTitle {

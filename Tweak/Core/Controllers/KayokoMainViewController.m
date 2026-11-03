@@ -2180,7 +2180,7 @@ NS_ASSUME_NONNULL_END
 
     LSApplicationWorkspace *workspace = [workspaceClass defaultWorkspace];
     if ([workspace respondsToSelector:@selector(openApplicationWithBundleID:)]) {
-        if (![(id)workspace openApplicationWithBundleID:bundleIdentifier]) {
+        if (![workspace openApplicationWithBundleID:bundleIdentifier]) {
             NSLog(@"Kayoko: Failed to launch %@", bundleIdentifier);
         }
         return;
