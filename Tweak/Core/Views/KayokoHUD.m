@@ -28,7 +28,7 @@ static NSUInteger kKayokoHUDGeneration = 0;
 @interface KayokoHUD ()
 + (void)presentStatus:(NSString *)status transient:(BOOL)transient;
 + (void)fadeOutCurrentPill;
-+ (nullable UIWindow *)keyWindow;
++ (nullable UIWindow *)hostWindow;
 @end
 
 @implementation KayokoHUD
@@ -61,7 +61,7 @@ static NSUInteger kKayokoHUDGeneration = 0;
       [kKayokoHUDContainer removeFromSuperview];
       kKayokoHUDContainer = nil;
 
-      UIWindow *window = [self keyWindow];
+      UIWindow *window = [self hostWindow];
       if (!window || text.length == 0) {
           return;
       }
@@ -99,7 +99,9 @@ static NSUInteger kKayokoHUDGeneration = 0;
 
       [NSLayoutConstraint activateConstraints:@[
           [container.centerXAnchor constraintEqualToAnchor:window.centerXAnchor],
-          [container.centerYAnchor constraintEqualToAnchor:window.centerYAnchor constant:90.0],
+          // Above the vertical centre: the panel owns the lower half of the screen, and a pill down there read
+          // as part of the list it was reporting on.
+          [container.centerYAnchor constraintEqualToAnchor:window.centerYAnchor constant:-60.0],
           [container.widthAnchor constraintLessThanOrEqualToAnchor:window.widthAnchor constant:-80.0],
           [stack.leadingAnchor constraintEqualToAnchor:container.leadingAnchor
                                              constant:kKayokoHUDHorizontalPadding],
@@ -152,7 +154,30 @@ static NSUInteger kKayokoHUDGeneration = 0;
         }];
 }
 
-+ (nullable UIWindow *)keyWindow {
++ (nullable UIWindow *)hostWindow {
+    // The panel is a subview of the status bar window, which sits far above the app's key window, so a pill
+    // pinned to the key window is drawn underneath the panel. Prefer that same window: the pill is added last
+    // there and therefore stays visible above the panel it is reporting on.
+    Class runtimeClass = NSClassFromString(@"KayokoCoreRuntime");
+    SEL sharedRuntimeSelector = NSSelectorFromString(@"sharedRuntime");
+    if (runtimeClass && [runtimeClass respondsToSelector:sharedRuntimeSelector]) {
+        id (*sharedRuntimeIMP)(id, SEL) =
+            (id (*)(id, SEL))[runtimeClass methodForSelector:sharedRuntimeSelector];
+        id runtime = sharedRuntimeIMP ? sharedRuntimeIMP(runtimeClass, sharedRuntimeSelector) : nil;
+        if (runtime) {
+            UIWindow *statusBarWindow = nil;
+            @try {
+                statusBarWindow = [runtime valueForKey:@"statusBarWindow"];
+            } @catch (NSException *exception) {
+                (void)exception;
+                statusBarWindow = nil;
+            }
+            if ([statusBarWindow isKindOfClass:[UIWindow class]] && ![statusBarWindow isHidden]) {
+                return statusBarWindow;
+            }
+        }
+    }
+
     // `UIApplication.windows` is deprecated and this project compiles against a
     // deployment target that forbids it, so the scene API is the only route.
     for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {

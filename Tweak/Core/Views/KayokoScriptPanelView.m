@@ -14,10 +14,33 @@ static CGFloat const kKayokoScriptPanelVerticalFadeHeight = 24;
 static CGFloat const kKayokoScriptPanelFooterHorizontalInset = 16;
 static CGFloat const kKayokoScriptPanelFooterBottomInset = 12;
 static CGFloat const kKayokoScriptPanelButtonHeight = 40;
-static CGFloat const kKayokoScriptPanelListTopInset = 8;
+static CGFloat const kKayokoScriptPanelListTopInset = 14;
 static CGFloat const kKayokoScriptPanelListBottomInset = 12;
 
 NS_ASSUME_NONNULL_BEGIN
+
+/// The panel is presented as a subview of the status bar window, and the list kept ending up a row's worth
+/// above its rest position there: whatever UIKit does to the offset after the panel is laid out, it always
+/// goes through -setContentOffset:, so holding the offset for the duration of the presentation is enough.
+@interface KayokoScriptPanelTableView : UITableView
+
+@property(nonatomic, assign) CGPoint restContentOffset;
+@property(nonatomic, assign) BOOL enforcesRestContentOffset;
+
+@end
+
+@implementation KayokoScriptPanelTableView
+
+- (void)setContentOffset:(CGPoint)contentOffset {
+    [super setContentOffset:([self enforcesRestContentOffset] ? [self restContentOffset] : contentOffset)];
+}
+
+- (void)setContentOffset:(CGPoint)contentOffset animated:(BOOL)animated {
+    [super setContentOffset:([self enforcesRestContentOffset] ? [self restContentOffset] : contentOffset)
+                   animated:animated];
+}
+
+@end
 
 static NSString *KayokoScriptPanelLocalizedString(NSString *key, NSString *fallback) {
     return [[KayokoPasteboardManager localizationBundle] localizedStringForKey:key value:fallback table:@"Tweak"];
@@ -63,15 +86,12 @@ NS_ASSUME_NONNULL_END
         _transitionContentView = [[UIView alloc] init];
         [self addSubview:_transitionContentView];
 
-        _tableView = [[UITableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
+        _tableView = [[KayokoScriptPanelTableView alloc] initWithFrame:CGRectZero style:UITableViewStylePlain];
         [_tableView setBackgroundColor:[UIColor clearColor]];
-        [_tableView setSeparatorStyle:UITableViewCellSeparatorStyleSingleLine];
-        [_tableView setSeparatorInset:UIEdgeInsetsMake(0, 16, 0, 0)];
+        // The rows carry no chrome: the list is a plain sequence of script names and separators only added noise.
+        [_tableView setSeparatorStyle:UITableViewCellSeparatorStyleNone];
         [_tableView setRowHeight:52];
         [_tableView setEstimatedRowHeight:52];
-        // The panel is shown before its final bounds are known, and UIKit's automatic inset adjustment used to
-        // hand back a stale safe-area value at that moment: the list then started above the header and the
-        // first row was clipped. A fixed inset keeps the rest position deterministic.
         [_tableView setContentInsetAdjustmentBehavior:UIScrollViewContentInsetAdjustmentNever];
         [_tableView setContentInset:UIEdgeInsetsMake(kKayokoScriptPanelListTopInset, 0,
                                                      kKayokoScriptPanelListBottomInset, 0)];
@@ -219,11 +239,14 @@ NS_ASSUME_NONNULL_END
     [[self tableView] setHidden:NO];
     [[self tableView] reloadData];
     [self layoutIfNeeded];
-    [[self tableView] setContentOffset:CGPointMake(0, -kKayokoScriptPanelListTopInset) animated:NO];
+    [self applyListRestPosition];
+    [[self listTableView] setEnforcesRestContentOffset:YES];
+    [self scheduleListRestRelease];
     [self showNotice:nil];
 }
 
 - (void)showResultWithText:(NSString *)text countText:(nullable NSString *)countText {
+    [[self listTableView] setEnforcesRestContentOffset:NO];
     [[self resultTextView] setText:text ?: @""];
     [[self resultTextView] setContentOffset:CGPointZero animated:NO];
     [[self resultCountLabel] setText:countText];
@@ -236,6 +259,45 @@ NS_ASSUME_NONNULL_END
 - (void)showNotice:(nullable NSString *)notice {
     [[self noticeLabel] setText:notice];
     [[self noticeLabel] setHidden:([notice length] == 0)];
+}
+
+#pragma mark - List Rest Position
+
+- (KayokoScriptPanelTableView *)listTableView {
+    return (KayokoScriptPanelTableView *)[self tableView];
+}
+
+- (void)applyListRestPosition {
+    KayokoScriptPanelTableView *tableView = [self listTableView];
+    CGPoint restOffset = CGPointMake(0, -kKayokoScriptPanelListTopInset);
+    [tableView setRestContentOffset:restOffset];
+    if (!CGPointEqualToPoint([tableView contentOffset], restOffset)) {
+        [tableView setContentOffset:restOffset animated:NO];
+    }
+}
+
+- (void)finishListPresentation {
+    if (![[self tableView] isHidden]) {
+        [self applyListRestPosition];
+    }
+    [[self listTableView] setEnforcesRestContentOffset:NO];
+}
+
+- (void)scheduleListRestRelease {
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.8 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      [[weakSelf listTableView] setEnforcesRestContentOffset:NO];
+    });
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+
+    // Runs once more after the presentation animation has moved everything; snapping here keeps the first row
+    // below the header instead of a row's worth above it.
+    if ([[self listTableView] enforcesRestContentOffset]) {
+        [self applyListRestPosition];
+    }
 }
 
 @end

@@ -28,6 +28,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)showList;
 - (void)showResultWithText:(NSString *)text countText:(nullable NSString *)countText;
 - (void)showNotice:(nullable NSString *)notice;
+/// Called once the presentation transition has finished, so the list can be put back at its rest position
+/// after UIKit has had its last word on the scroll offset.
+- (void)finishListPresentation;
 
 @end
 
