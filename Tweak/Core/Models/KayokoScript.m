@@ -5,7 +5,7 @@
 
 #import "KayokoScript.h"
 
-#import "KayokoPasteboardManager.h"
+#import "KayokoScriptResources.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -54,8 +54,7 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 - (NSString *)displayName {
-    NSBundle *bundle = [KayokoPasteboardManager localizationBundle];
-    NSString *localized = [bundle localizedStringForKey:[self identifier] value:[self name] table:@"Tweak"];
+    NSString *localized = KayokoScriptLocalizedString([self identifier], [self name]);
     if ([localized length] > 0) {
         return localized;
     }

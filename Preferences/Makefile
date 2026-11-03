@@ -6,6 +6,15 @@ KayokoPreferences_FILES += $(wildcard Controllers/*.m Cells/*.m Utilities/*.m)
 KayokoPreferences_FILES += $(wildcard ../Shared/Tags/*.m)
 KayokoPreferences_FILES += $(wildcard ../Shared/Purchases/*.m)
 
+# The script model, store and runner are shared with the tweak: this page is the only way to manage
+# scripts.plist, and it has to read, write and dry-run exactly what the panel consumes. They are compiled
+# into both binaries rather than linked, because the Settings bundle never loads KayokoCore.
+KayokoPreferences_FILES += ../Tweak/Core/Models/KayokoScript.m
+KayokoPreferences_FILES += ../Tweak/Core/Models/KayokoScriptResources.m
+KayokoPreferences_FILES += ../Tweak/Core/Models/KayokoScriptStore.m
+KayokoPreferences_FILES += ../Tweak/Core/Models/KayokoScriptFailure.m
+KayokoPreferences_FILES += ../Tweak/Core/Actions/KayokoScriptRunner.m
+
 KayokoPreferences_CFLAGS += -fobjc-arc
 KayokoPreferences_CFLAGS += -I.
 KayokoPreferences_CFLAGS += -I../Preferences
@@ -14,6 +23,8 @@ KayokoPreferences_CFLAGS += -ICells
 KayokoPreferences_CFLAGS += -IUtilities
 KayokoPreferences_CFLAGS += -I../Shared/Tags
 KayokoPreferences_CFLAGS += -I../Shared/Purchases
+KayokoPreferences_CFLAGS += -I../Tweak/Core/Models
+KayokoPreferences_CFLAGS += -I../Tweak/Core/Actions
 
 KayokoPreferences_FRAMEWORKS += CoreGraphics
 KayokoPreferences_FRAMEWORKS += QuartzCore

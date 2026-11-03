@@ -69,6 +69,35 @@ NS_ASSUME_NONNULL_BEGIN
                             logs:logs];
 }
 
+- (NSString *)technicalSummary {
+    NSMutableArray<NSString *> *lines = [NSMutableArray array];
+
+    NSMutableString *header = [[self code] mutableCopy];
+    if ([[self stage] length] > 0) {
+        [header appendFormat:@" · %@", [self stage]];
+    }
+    if ([self line] > 0) {
+        [header appendFormat:@" · line %ld", (long)[self line]];
+    }
+    [lines addObject:header];
+
+    if ([[self message] length] > 0) {
+        [lines addObject:[self message]];
+    }
+    if ([[self sourceLine] length] > 0) {
+        [lines addObject:[NSString stringWithFormat:@"> %@", [self sourceLine]]];
+    }
+
+    NSArray<NSString *> *logs = [self logs];
+    if ([logs count] > 0) {
+        [lines addObject:@""];
+        [lines addObject:@"console:"];
+        [lines addObjectsFromArray:logs];
+    }
+
+    return [lines componentsJoinedByString:@"\n"];
+}
+
 - (NSNumber *_Nullable)numberForKey:(NSString *)key {
     id value = [[self fields] objectForKey:key];
     return [value isKindOfClass:[NSNumber class]] ? value : nil;

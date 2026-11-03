@@ -5,8 +5,8 @@
 
 #import "KayokoScriptStore.h"
 
-#import "KayokoPasteboardManager.h"
 #import "KayokoScript.h"
+#import "KayokoScriptResources.h"
 
 #import <roothide.h>
 
@@ -130,7 +130,7 @@ NS_ASSUME_NONNULL_END
 }
 
 - (nullable NSArray<NSDictionary<NSString *, id> *> *)bundledScriptDictionaries {
-    NSBundle *bundle = [KayokoPasteboardManager localizationBundle];
+    NSBundle *bundle = KayokoScriptResourcesBundle();
     NSString *path = [bundle pathForResource:kKayokoScriptStoreBundledResourceName ofType:@"plist"];
     if ([path length] == 0) {
         return nil;

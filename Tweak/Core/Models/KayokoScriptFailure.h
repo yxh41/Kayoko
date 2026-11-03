@@ -44,6 +44,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable NSNumber *)numberForKey:(NSString *)key;
 - (nullable NSString *)stringForKey:(NSString *)key;
 
+/// Compact technical report used by the dry-run page in Settings: code, stage, line, the engine's own sentence,
+/// the offending source line and whatever the script logged. Deliberately untranslated - a script author wants
+/// the engine's wording, not ours.
+- (NSString *)technicalSummary;
+
 @end
 
 NS_ASSUME_NONNULL_END

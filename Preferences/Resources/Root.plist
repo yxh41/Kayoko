@@ -19,7 +19,7 @@
 			<key>headerSubtitle</key>
 			<string>Feature-rich clipboard manager for iOS.</string>
 			<key>detail</key>
-			<string>v4.3.33</string>
+			<string>v4.3.34</string>
 			<key>height</key>
 			<integer>92</integer>
 		</dict>
@@ -524,6 +524,14 @@
 			<string>Advanced Options</string>
 			<key>detail</key>
 			<string>KayokoAdvancedOptionsListController</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSLinkCell</string>
+			<key>label</key>
+			<string>Scripts</string>
+			<key>detail</key>
+			<string>KayokoScriptsListViewController</string>
 		</dict>
 		<dict>
 			<key>cell</key>
