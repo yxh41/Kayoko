@@ -19,7 +19,7 @@
 			<key>headerSubtitle</key>
 			<string>Feature-rich clipboard manager for iOS.</string>
 			<key>detail</key>
-			<string>v4.3.34</string>
+			<string>v4.3.35</string>
 			<key>height</key>
 			<integer>92</integer>
 		</dict>
@@ -529,7 +529,7 @@
 			<key>cell</key>
 			<string>PSLinkCell</string>
 			<key>label</key>
-			<string>Scripts</string>
+			<string>Script Management</string>
 			<key>detail</key>
 			<string>KayokoScriptsListViewController</string>
 		</dict>

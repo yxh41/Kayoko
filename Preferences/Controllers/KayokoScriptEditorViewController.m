@@ -16,54 +16,141 @@ static CGFloat const kKayokoScriptEditorCodeHeight = 300.0;
 
 #pragma mark - Output
 
-/// A dry run produces either a result or a diagnostic, and both are worth reading at full width rather than
-/// squeezing into a cell, so the run lands here.
+/// A dry run turns one input into one or more outputs, and the whole point is to see the transformation, so
+/// the page mirrors that pairing: the input it ran against, then each result in its own card. A result that
+/// looks like the input (dedupe, sort, trim) is still clearly the transformed copy, not the field above.
 @interface KayokoScriptOutputViewController : UIViewController
 
-- (instancetype)initWithTitle:(NSString *)title text:(NSString *)text;
+- (instancetype)initWithInput:(NSString *)input
+                      results:(NSArray<NSString *> *)results
+                     failure:(nullable KayokoScriptFailure *)failure
+            localizationBundle:(NSBundle *)bundle
+                        title:(NSString *)title;
 
 @end
 
 @implementation KayokoScriptOutputViewController {
-    NSString *_outputTitle;
-    NSString *_outputText;
+    NSString *_input;
+    NSArray<NSString *> *_results;
+    KayokoScriptFailure *_failure;
+    NSBundle *_bundle;
+    NSString *_pageTitle;
 }
 
-- (instancetype)initWithTitle:(NSString *)title text:(NSString *)text {
+- (instancetype)initWithInput:(NSString *)input
+                      results:(NSArray<NSString *> *)results
+                     failure:(nullable KayokoScriptFailure *)failure
+            localizationBundle:(NSBundle *)bundle
+                        title:(NSString *)title {
     self = [super initWithNibName:nil bundle:nil];
     if (self) {
-        _outputTitle = [title copy];
-        _outputText = [text copy];
+        _input = [input copy];
+        _results = [results count] ? [results copy] : @[];
+        _failure = failure;
+        _bundle = bundle ?: [NSBundle mainBundle];
+        _pageTitle = [title copy];
         [self setModalPresentationStyle:UIModalPresentationPageSheet];
     }
     return self;
+}
+
+- (NSString *)localizedStringForKey:(NSString *)key {
+    return [_bundle localizedStringForKey:key value:key table:@"Tweak"];
+}
+
+- (UIView *)cardWithTitle:(NSString *)title body:(NSString *)body accent:(BOOL)accent {
+    UIView *card = [[UIView alloc] init];
+    [card setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [card setBackgroundColor:accent ? [UIColor tertiarySystemBackgroundColor]
+                                    : [UIColor secondarySystemGroupedBackgroundColor]];
+    [[card layer] setCornerRadius:12];
+    [card setClipsToBounds:YES];
+
+    UILabel *titleLabel = [[UILabel alloc] init];
+    [titleLabel setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [titleLabel setText:title];
+    [titleLabel setFont:[UIFont systemFontOfSize:13 weight:UIFontWeightSemibold]];
+    [titleLabel setTextColor:accent ? [UIColor labelColor] : [UIColor secondaryLabelColor]];
+
+    UILabel *bodyLabel = [[UILabel alloc] init];
+    [bodyLabel setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [bodyLabel setText:body ?: @""];
+    [bodyLabel setFont:[UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular]];
+    [bodyLabel setTextColor:[UIColor labelColor]];
+    [bodyLabel setNumberOfLines:0];
+    [bodyLabel setLineBreakMode:NSLineBreakByCharWrapping];
+
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[ titleLabel, bodyLabel ]];
+    [stack setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [stack setAxis:UILayoutConstraintAxisVertical];
+    [stack setSpacing:8];
+    [card addSubview:stack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [[stack topAnchor] constraintEqualToAnchor:[card topAnchor] constant:12],
+        [[stack leadingAnchor] constraintEqualToAnchor:[card leadingAnchor] constant:12],
+        [[stack trailingAnchor] constraintEqualToAnchor:[card trailingAnchor] constant:-12],
+        [[stack bottomAnchor] constraintEqualToAnchor:[card bottomAnchor] constant:-12]
+    ]];
+
+    return card;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
 
     [[self view] setBackgroundColor:[UIColor systemBackgroundColor]];
-    [self setTitle:_outputTitle];
+    [self setTitle:_pageTitle];
 
-    UITextView *textView = [[UITextView alloc] init];
-    [textView setTranslatesAutoresizingMaskIntoConstraints:NO];
-    [textView setEditable:NO];
-    [textView setText:_outputText];
-    [textView setFont:[UIFont monospacedSystemFontOfSize:13 weight:UIFontWeightRegular]];
-    [textView setTextContainerInset:UIEdgeInsetsMake(12, 12, 12, 12)];
-    [[self view] addSubview:textView];
+    UIScrollView *scrollView = [[UIScrollView alloc] init];
+    [scrollView setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [scrollView setAlwaysBounceVertical:YES];
+    [[self view] addSubview:scrollView];
+
+    UIStackView *stack = [[UIStackView alloc] init];
+    [stack setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [stack setAxis:UILayoutConstraintAxisVertical];
+    [stack setSpacing:16];
+    [scrollView addSubview:stack];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [[scrollView topAnchor] constraintEqualToAnchor:[[self view] safeAreaLayoutGuide].topAnchor],
+        [[scrollView leadingAnchor] constraintEqualToAnchor:[[self view] leadingAnchor]],
+        [[scrollView trailingAnchor] constraintEqualToAnchor:[[self view] trailingAnchor]],
+        [[scrollView bottomAnchor] constraintEqualToAnchor:[[self view] bottomAnchor]],
+        [[stack topAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide].topAnchor constant:16],
+        [[stack leadingAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide].leadingAnchor constant:16],
+        [[stack trailingAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide].trailingAnchor constant:-16],
+        [[stack bottomAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide].bottomAnchor constant:-16],
+        [[stack widthAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide].widthAnchor]
+    ]];
+
+    [stack addArrangedSubview:[self cardWithTitle:[self localizedStringForKey:@"Input"]
+                                             body:_input
+                                           accent:NO]];
+
+    if (_failure) {
+        [stack addArrangedSubview:[self cardWithTitle:[self localizedStringForKey:@"Error"]
+                                                 body:[_failure technicalSummary]
+                                               accent:YES]];
+    } else if ([_results count] == 0) {
+        [stack addArrangedSubview:[self cardWithTitle:[self localizedStringForKey:@"Output"]
+                                                 body:[self localizedStringForKey:@"No matches"]
+                                               accent:YES]];
+    } else {
+        [_results enumerateObjectsUsingBlock:^(NSString *result, NSUInteger index, BOOL *stop) {
+            NSString *title = ([_results count] == 1)
+                ? [self localizedStringForKey:@"Output"]
+                : [NSString stringWithFormat:@"%@ %lu", [self localizedStringForKey:@"Output"],
+                                               (unsigned long)(index + 1)];
+            [stack addArrangedSubview:[self cardWithTitle:title body:result accent:YES]];
+        }];
+    }
 
     UIBarButtonItem *doneItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
                                                                              target:self
                                                                              action:@selector(dismissSelf)];
     [[self navigationItem] setRightBarButtonItem:doneItem];
-
-    [NSLayoutConstraint activateConstraints:@[
-        [[textView topAnchor] constraintEqualToAnchor:[[self view] safeAreaLayoutGuide].topAnchor],
-        [[textView leadingAnchor] constraintEqualToAnchor:[[self view] leadingAnchor]],
-        [[textView trailingAnchor] constraintEqualToAnchor:[[self view] trailingAnchor]],
-        [[textView bottomAnchor] constraintEqualToAnchor:[[self view] bottomAnchor]]
-    ]];
 }
 
 - (void)dismissSelf {
@@ -406,16 +493,9 @@ static CGFloat const kKayokoScriptEditorCodeHeight = 300.0;
                     [[strongSelf tableView] reloadSections:[NSIndexSet indexSetWithIndex:2]
                                           withRowAnimation:UITableViewRowAnimationNone];
 
-                    NSString *text = nil;
-                    if (failure) {
-                        text = [failure technicalSummary];
-                    } else if ([results count] == 0) {
-                        text = [strongSelf localizedStringForKey:@"No matches"];
-                    } else {
-                        text = [results componentsJoinedByString:@"\n\n————\n\n"];
-                    }
-
-                    [strongSelf presentOutput:text];
+                    [strongSelf presentOutputWithInput:[[strongSelf inputField] text] ?: @""
+                                               results:results
+                                              failure:failure];
                   }];
 }
 
@@ -467,10 +547,15 @@ static CGFloat const kKayokoScriptEditorCodeHeight = 300.0;
 
 #pragma mark - Presentation
 
-- (void)presentOutput:(NSString *)text {
+- (void)presentOutputWithInput:(NSString *)input
+                       results:(NSArray<NSString *> *)results
+                      failure:(KayokoScriptFailure *)failure {
     KayokoScriptOutputViewController *output =
-        [[KayokoScriptOutputViewController alloc] initWithTitle:[self localizedStringForKey:@"Run Result"]
-                                                           text:text ?: @""];
+        [[KayokoScriptOutputViewController alloc] initWithInput:input
+                                                      results:results
+                                                     failure:failure
+                                            localizationBundle:[self localizationBundle]
+                                                        title:[self localizedStringForKey:@"Run Result"]];
     UINavigationController *navigationController =
         [[UINavigationController alloc] initWithRootViewController:output];
     [self presentViewController:navigationController animated:YES completion:nil];

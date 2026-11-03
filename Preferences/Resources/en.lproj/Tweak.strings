@@ -135,3 +135,6 @@
 "Untitled Script" = "Untitled Script";
 "Run Result" = "Run Result";
 "Script Footer Hint" = "Define main(text) and return a string or a list of strings.";
+"Input" = "Input";
+"Output" = "Output";
+"Error" = "Error";

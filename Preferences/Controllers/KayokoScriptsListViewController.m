@@ -41,7 +41,7 @@ static NSString *const kKayokoScriptsListCellReuseIdentifier = @"KayokoScriptsLi
     _scriptStore = [[KayokoScriptStore alloc] init];
     _scripts = [[NSMutableArray alloc] init];
 
-    [self setTitle:[self localizedStringForKey:@"Scripts"]];
+    [self setTitle:[self localizedStringForKey:@"Script Management"]];
     [self reloadScripts];
     [self configureNavigationItem];
     [self configureTableView];

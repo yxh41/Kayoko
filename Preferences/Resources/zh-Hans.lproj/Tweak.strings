@@ -135,3 +135,6 @@
 "Untitled Script" = "未命名脚本";
 "Run Result" = "运行结果";
 "Script Footer Hint" = "定义 main(text)，返回字符串或字符串数组。";
+"Input" = "输入";
+"Output" = "输出";
+"Error" = "错误";
