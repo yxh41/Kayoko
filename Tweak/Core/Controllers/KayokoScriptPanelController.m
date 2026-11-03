@@ -66,10 +66,10 @@ NS_ASSUME_NONNULL_END
         [[[_panelView headerView] leadingButton] addTarget:self
                                                     action:@selector(handleBackButtonPressed)
                                           forControlEvents:UIControlEventTouchUpInside];
-        [[_panelView copyButton] addTarget:self
+        [[_panelView resultCopyButton] addTarget:self
                                     action:@selector(handleCopyButtonPressed)
                           forControlEvents:UIControlEventTouchUpInside];
-        [[_panelView pasteButton] addTarget:self
+        [[_panelView resultPasteButton] addTarget:self
                                      action:@selector(handlePasteButtonPressed)
                            forControlEvents:UIControlEventTouchUpInside];
         [[_panelView tableView] setDataSource:self];
@@ -188,7 +188,10 @@ NS_ASSUME_NONNULL_END
 
                     [strongSelf setValues:results ?: @[]];
                     if ([results count] == 1) {
-                        [strongSelf showResultStateWithText:[results firstObject]];
+                        NSString *singleResult = [results firstObject];
+                        if ([singleResult length] > 0) {
+                            [strongSelf showResultStateWithText:singleResult];
+                        }
                     } else {
                         [strongSelf showChoicesState];
                     }

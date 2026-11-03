@@ -29,8 +29,8 @@ static NSString *KayokoScriptPanelLocalizedString(NSString *key, NSString *fallb
 @property(nonatomic, strong, readwrite) UIView *resultView;
 @property(nonatomic, strong, readwrite) KayokoEdgeFadingTextView *resultTextView;
 @property(nonatomic, strong, readwrite) UILabel *resultCountLabel;
-@property(nonatomic, strong, readwrite) UIButton *copyButton;
-@property(nonatomic, strong, readwrite) UIButton *pasteButton;
+@property(nonatomic, strong, readwrite) UIButton *resultCopyButton;
+@property(nonatomic, strong, readwrite) UIButton *resultPasteButton;
 @property(nonatomic, strong, readwrite) UILabel *noticeLabel;
 @property(nonatomic, strong) UIStackView *footerStackView;
 
@@ -101,13 +101,13 @@ NS_ASSUME_NONNULL_END
         [_resultCountLabel setNumberOfLines:1];
         [_resultCountLabel setHidden:YES];
 
-        _copyButton = [self footerButtonWithTitle:KayokoScriptPanelLocalizedString(@"Copy", @"Copy")
+        _resultCopyButton = [self footerButtonWithTitle:KayokoScriptPanelLocalizedString(@"Copy", @"Copy")
                                            weight:UIFontWeightMedium];
-        _pasteButton = [self footerButtonWithTitle:KayokoScriptPanelLocalizedString(@"Paste", @"Paste")
+        _resultPasteButton = [self footerButtonWithTitle:KayokoScriptPanelLocalizedString(@"Paste", @"Paste")
                                             weight:UIFontWeightSemibold];
 
         UIStackView *buttonStackView =
-            [[UIStackView alloc] initWithArrangedSubviews:@[ _copyButton, _pasteButton ]];
+            [[UIStackView alloc] initWithArrangedSubviews:@[ _resultCopyButton, _resultPasteButton ]];
         [buttonStackView setAxis:UILayoutConstraintAxisHorizontal];
         [buttonStackView setDistribution:UIStackViewDistributionFillEqually];
         [buttonStackView setSpacing:12];
@@ -194,8 +194,8 @@ NS_ASSUME_NONNULL_END
         [[footerStackView bottomAnchor] constraintEqualToAnchor:[safeArea bottomAnchor]
                                                        constant:-kKayokoScriptPanelFooterBottomInset],
 
-        [[[self copyButton] heightAnchor] constraintEqualToConstant:kKayokoScriptPanelButtonHeight],
-        [[[self pasteButton] heightAnchor] constraintEqualToConstant:kKayokoScriptPanelButtonHeight],
+        [[[self resultCopyButton] heightAnchor] constraintEqualToConstant:kKayokoScriptPanelButtonHeight],
+        [[[self resultPasteButton] heightAnchor] constraintEqualToConstant:kKayokoScriptPanelButtonHeight],
     ]];
 }
 

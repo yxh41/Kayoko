@@ -20,8 +20,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, strong, readonly) UIView *resultView;
 @property(nonatomic, strong, readonly) KayokoEdgeFadingTextView *resultTextView;
 @property(nonatomic, strong, readonly) UILabel *resultCountLabel;
-@property(nonatomic, strong, readonly) UIButton *copyButton;
-@property(nonatomic, strong, readonly) UIButton *pasteButton;
+@property(nonatomic, strong, readonly) UIButton *resultCopyButton;
+@property(nonatomic, strong, readonly) UIButton *resultPasteButton;
 @property(nonatomic, strong, readonly) UILabel *noticeLabel;
 
 - (void)setTitleText:(NSString *)title;
