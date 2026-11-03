@@ -22,6 +22,8 @@
 #import "KayokoPreviewView.h"
 #import "KayokoPreviewViewController.h"
 #import "KayokoSearchController.h"
+#import "KayokoScriptPanelController.h"
+#import "KayokoScriptPanelView.h"
 #import "KayokoTableViewCell.h"
 #import "KayokoTagCatalog.h"
 #import "KayokoWordSelectionView.h"
@@ -44,6 +46,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface KayokoMainViewController () <KayokoClearConfirmationViewControllerDelegate, KayokoHistoryControllerDelegate,
                                         KayokoPanelPresentationControllerDelegate, KayokoSearchControllerDelegate,
                                         KayokoHistoryListViewControllerDelegate, KayokoNoteEditorViewControllerDelegate,
+                                        KayokoScriptPanelControllerDelegate,
                                         KayokoWordSelectionViewControllerDelegate, UIGestureRecognizerDelegate>
 #pragma mark - Views
 
@@ -59,6 +62,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, strong) KayokoHistoryListViewController *favoritesListViewController;
 @property(nonatomic, strong) KayokoClearConfirmationViewController *clearConfirmationViewController;
 @property(nonatomic, strong) KayokoPreviewViewController *previewViewController;
+@property(nonatomic, strong) KayokoScriptPanelController *scriptPanelController;
 @property(nonatomic, strong) KayokoWordSelectionViewController *wordSelectionViewController;
 @property(nonatomic, strong) KayokoNoteEditorViewController *noteEditorViewController;
 
@@ -189,6 +193,9 @@ NS_ASSUME_NONNULL_END
         [_previewViewController setHapticFeedbackHandler:^(UIImpactFeedbackStyle style) {
           [[weakSelf panelPresentationController] triggerHapticFeedbackWithStyle:style];
         }];
+        [_previewViewController setScriptButtonHandler:^(KayokoPasteboardItem *item, NSString *historyKey) {
+          [weakSelf showScriptPanelForItem:item historyKey:historyKey];
+        }];
         [self addChildViewController:_previewViewController];
         KayokoHeaderView *previewHeaderView = [[_previewViewController previewView] headerView];
         [_mainView installFullContentView:[_previewViewController previewView] headerView:previewHeaderView hidden:YES];
@@ -203,6 +210,19 @@ NS_ASSUME_NONNULL_END
         [[previewHeaderView titleTapControl] addTarget:self
                                                 action:@selector(handleTitleTapControlPressed)
                                       forControlEvents:UIControlEventTouchUpInside];
+
+        _scriptPanelController = [[KayokoScriptPanelController alloc] init];
+        [_scriptPanelController setDelegate:self];
+        [_scriptPanelController setHapticFeedbackHandler:^(UIImpactFeedbackStyle style) {
+          [[weakSelf panelPresentationController] triggerHapticFeedbackWithStyle:style];
+        }];
+        [self addChildViewController:_scriptPanelController];
+        KayokoHeaderView *scriptHeaderView = [[_scriptPanelController panelView] headerView];
+        [_mainView installFullContentView:[_scriptPanelController panelView]
+                               headerView:scriptHeaderView
+                                   hidden:YES];
+        [_panelPresentationController registerHeaderView:scriptHeaderView];
+        [_scriptPanelController didMoveToParentViewController:self];
 
         _wordSelectionViewController = [[KayokoWordSelectionViewController alloc]
             initWithName:[[KayokoPasteboardManager localizationBundle] localizedStringForKey:@"Preview"
@@ -970,6 +990,12 @@ NS_ASSUME_NONNULL_END
 }
 
 - (UIView *)activeTransientContentViewForEdgeBackGesture {
+    // The script panel is a sub-layer of the preview and the interactive return only knows how to unwind one
+    // level, so it stays out of this gesture. The header back button drives the return instead.
+    if (![[[self scriptPanelController] panelView] isHidden]) {
+        return nil;
+    }
+
     KayokoPreviewView *previewView = [[self previewViewController] previewView];
     if (![previewView isHidden] && [[self previewViewController] previewItem]) {
         return previewView;
@@ -1861,6 +1887,58 @@ NS_ASSUME_NONNULL_END
     [[self panelPresentationController] triggerHapticFeedbackWithStyle:UIImpactFeedbackStyleMedium];
 }
 
+- (void)showScriptPanelForItem:(KayokoPasteboardItem *)item historyKey:(NSString *)historyKey {
+    (void)historyKey;
+    if ([[self panelPresentationController] isAnimating] || [[self mainView] isAnimating]) {
+        return;
+    }
+
+    KayokoPreviewView *previewView = [[self previewViewController] previewView];
+    if ([previewView isHidden]) {
+        return;
+    }
+
+    KayokoScriptPanelView *scriptPanelView = [[self scriptPanelController] panelView];
+    [[self scriptPanelController] beginWithText:[item content] ?: @""];
+    [scriptPanelView setHidden:NO];
+
+    KayokoHeaderView *mainHeaderView = [[self mainView] headerView];
+    [[scriptPanelView headerView] setGrabberFoldProgress:[mainHeaderView grabberFoldProgress]];
+    [[scriptPanelView headerView] setHidden:NO];
+    [[previewView headerView] setHidden:YES];
+
+    [[self mainView] showContentView:scriptPanelView
+                   transitioningView:[scriptPanelView transitionContentView]
+                     hideContentView:previewView
+                   transitioningView:[previewView transitionContentView]
+                           direction:KayokoContentTransitionDirectionForward
+                 alongsideAnimations:nil
+                          completion:nil];
+    [[self panelPresentationController] triggerHapticFeedbackWithStyle:UIImpactFeedbackStyleMedium];
+}
+
+- (void)hideScriptPanel {
+    KayokoScriptPanelView *scriptPanelView = [[self scriptPanelController] panelView];
+    if ([scriptPanelView isHidden] || [[self panelPresentationController] isAnimating]) {
+        return;
+    }
+
+    KayokoPreviewView *previewView = [[self previewViewController] previewView];
+    [[previewView headerView] setHidden:NO];
+    [[scriptPanelView headerView] setHidden:YES];
+
+    [[self mainView] showContentView:previewView
+        transitioningView:[previewView transitionContentView]
+        hideContentView:scriptPanelView
+        transitioningView:[scriptPanelView transitionContentView]
+        direction:KayokoContentTransitionDirectionBackward
+        alongsideAnimations:nil
+        completion:^{
+          [[self scriptPanelController] resetState];
+          [[scriptPanelView headerView] setHidden:NO];
+        }];
+}
+
 - (void)hidePreview {
     if ([[[self previewViewController] previewView] isHidden] || [[self panelPresentationController] isAnimating]) {
         return;
@@ -1935,6 +2013,47 @@ NS_ASSUME_NONNULL_END
           [mainHeaderView setHidden:NO];
           [mainHeaderView setAlpha:1.0];
         }];
+}
+
+#pragma mark - KayokoScriptPanelControllerDelegate
+
+- (void)scriptPanelControllerDidRequestBack:(KayokoScriptPanelController *)controller {
+    (void)controller;
+    [self hideScriptPanel];
+    [[self panelPresentationController] triggerHapticFeedbackWithStyle:UIImpactFeedbackStyleSoft];
+}
+
+- (void)scriptPanelController:(KayokoScriptPanelController *)controller didRequestCopyText:(NSString *)text {
+    (void)controller;
+    KayokoPasteboardItem *sourceItem = [[self previewViewController] previewItem];
+    if (!sourceItem || [text length] == 0) {
+        return;
+    }
+
+    KayokoPasteboardItem *item = [[KayokoPasteboardItem alloc] initWithBundleIdentifier:[sourceItem bundleIdentifier]
+                                                                            andContent:text
+                                                                        withImageNamed:nil];
+    [[KayokoPasteboardManager sharedInstance] copyPasteboardItemToPasteboard:item];
+    [[self panelPresentationController] prepareStandardDismissAnimation];
+    [self hideAfterDirectPaste];
+}
+
+- (void)scriptPanelController:(KayokoScriptPanelController *)controller didRequestPasteText:(NSString *)text {
+    (void)controller;
+    KayokoPasteboardItem *sourceItem = [[self previewViewController] previewItem];
+    if (!sourceItem || [text length] == 0) {
+        return;
+    }
+
+    KayokoPasteboardItem *item = [[KayokoPasteboardItem alloc] initWithBundleIdentifier:[sourceItem bundleIdentifier]
+                                                                            andContent:text
+                                                                        withImageNamed:nil];
+    [[KayokoPasteboardManager sharedInstance] writePasteboardItem:item
+                                                sourceHistoryItem:sourceItem
+                                               fromHistoryWithKey:[self effectiveActiveHistoryKey]
+                                             allowsAutomaticPaste:YES];
+    [[self panelPresentationController] prepareStandardDismissAnimation];
+    [self hideAfterDirectPaste];
 }
 
 #pragma mark - KayokoClearConfirmationViewControllerDelegate
@@ -2120,6 +2239,8 @@ NS_ASSUME_NONNULL_END
     [[[self mainView] headerView] setAlpha:1.0];
     [[self previewViewController] resetPreviewState];
     [[self wordSelectionViewController] resetWordSelectionState];
+    [[self scriptPanelController] resetState];
+    [[[self scriptPanelController] panelView] setHidden:YES];
     [self resetNoteEditingState];
     [self setActiveSourceContentView:nil];
     [self setDismissingPanel:NO];

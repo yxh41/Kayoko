@@ -1,4 +1,4 @@
-export PACKAGE_VERSION := 4.3.27
+export PACKAGE_VERSION := 4.3.28
 export ARCHS := arm64 arm64e
 export TARGET := iphone:clang:16.5:14.0
 
@@ -6,6 +6,7 @@ INSTALL_TARGET_PROCESSES := backboardd druid pasted
 
 SUBPROJECTS += Tweak/Core
 SUBPROJECTS += Tweak/Helper
+SUBPROJECTS += Tweak/Script
 SUBPROJECTS += Preferences
 SUBPROJECTS += Updater
 

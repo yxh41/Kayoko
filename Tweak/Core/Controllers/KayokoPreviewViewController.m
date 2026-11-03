@@ -99,6 +99,25 @@ NS_ASSUME_NONNULL_END
                                                                            table:@"Tweak"]];
     [[headerView trailingButton] setEnabled:YES];
     [[headerView trailingButton] setAlpha:1.0];
+
+    // The alternate slot sits left of the primary action and is unused everywhere else, so the script entry
+    // costs no extra layout work.
+    UIButton *scriptButton = [headerView alternateTrailingButton];
+    [headerView updateStyleForButton:scriptButton
+                       withImageName:@"wand.and.stars"
+                           imageSize:kKayokoBackButtonImageSize
+                           tintColor:[UIColor labelColor]];
+    [scriptButton setAccessibilityLabel:[[KayokoPasteboardManager localizationBundle]
+                                            localizedStringForKey:@"Scripts"
+                                                            value:@"Scripts"
+                                                            table:@"Tweak"]];
+    [scriptButton removeTarget:self
+                        action:@selector(handleScriptButtonPressed)
+              forControlEvents:UIControlEventTouchUpInside];
+    [scriptButton addTarget:self
+                     action:@selector(handleScriptButtonPressed)
+           forControlEvents:UIControlEventTouchUpInside];
+    [scriptButton setHidden:[[item imageName] length] > 0 || [[item content] length] == 0];
 }
 
 #pragma mark - Tags
@@ -148,6 +167,17 @@ NS_ASSUME_NONNULL_END
                                 [strongSelf tagAssignmentHandler](item, historyKey);
                             }
                           }];
+}
+
+- (void)handleScriptButtonPressed {
+    KayokoPasteboardItem *item = [self previewItem];
+    if (!item) {
+        return;
+    }
+
+    if ([self scriptButtonHandler]) {
+        [self scriptButtonHandler](item, [self sourceHistoryKey]);
+    }
 }
 
 - (NSString *)actionImageNameForItem:(KayokoPasteboardItem *)item {
