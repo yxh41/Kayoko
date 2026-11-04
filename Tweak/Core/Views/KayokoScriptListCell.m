@@ -88,7 +88,7 @@ NS_ASSUME_NONNULL_END
         CGFloat maximumBadgeWidth = available * 0.4;
         CGFloat measuredWidth = ceil([[badgeLabel text]
             sizeWithAttributes:@{NSFontAttributeName : [badgeLabel font]}].width) +
-            kKayokoScriptListCellHorizontalPadding * 2;
+            kKayokoScriptListCellBadgeHorizontalPadding * 2;
         badgeWidth = MIN(measuredWidth, maximumBadgeWidth);
         [badgeLabel setFrame:CGRectMake(CGRectGetWidth(bounds) - kKayokoScriptListCellHorizontalInset - badgeWidth,
                                        (height - kKayokoScriptListCellBadgeHeight) / 2.0, badgeWidth,
