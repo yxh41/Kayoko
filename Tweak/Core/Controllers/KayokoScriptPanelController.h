@@ -17,10 +17,11 @@ NS_ASSUME_NONNULL_BEGIN
          didRequestCopyText:(NSString *)text;
 - (void)scriptPanelController:(KayokoScriptPanelController *)controller
         didRequestPasteText:(NSString *)text;
-/// The script asked to open a link. Both `url` and `urlInApp` land here; iOS 16 has no in-app browser worth
-/// faking, so the host opens it the same way.
+/// The script asked to open a link. `inApp` distinguishes `urlInApp` from `url`: the host shows an in-app browser
+/// instead of leaving the app the panel was opened over.
 - (void)scriptPanelController:(KayokoScriptPanelController *)controller
-             didRequestOpenURL:(NSString *)urlString;
+             didRequestOpenURL:(NSString *)urlString
+                        inApp:(BOOL)inApp;
 /// The script asked to open an app by bundle identifier.
 - (void)scriptPanelController:(KayokoScriptPanelController *)controller
     didRequestOpenApplication:(NSString *)bundleIdentifier;
@@ -39,7 +40,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, weak, nullable) id<KayokoScriptPanelControllerDelegate> delegate;
 @property(nonatomic, copy, nullable) void (^hapticFeedbackHandler)(UIImpactFeedbackStyle style);
 
-- (void)beginWithText:(NSString *)text;
+/// `text` may be empty: a script that only works on the clipboard is a first-class case, so the panel runs it
+/// with an empty input instead of refusing. `sourceBundleIdentifier` is passed through as `$env.bundleIdentifier`
+/// and may be `nil` when the panel was not opened from a history item.
+- (void)beginWithText:(NSString *)text sourceBundleIdentifier:(nullable NSString *)sourceBundleIdentifier;
 - (void)resetState;
 
 @end

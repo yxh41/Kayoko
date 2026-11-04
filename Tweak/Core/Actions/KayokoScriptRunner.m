@@ -102,9 +102,10 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
 }
 
 - (void)runScript:(KayokoScript *)script
-            input:(NSString *)input
+    input:(NSString *)input
     clipboardText:(nullable NSString *)clipboardText
-       completion:(KayokoScriptRunnerCompletion)completion {
+    sourceBundleIdentifier:(nullable NSString *)sourceBundleIdentifier
+    completion:(KayokoScriptRunnerCompletion)completion {
     if (!completion) {
         return;
     }
@@ -128,6 +129,7 @@ static NSArray<NSString *> *kayokoScriptLogLines(NSData *data, BOOL truncated) {
         @"input" : input ?: @"",
         @"limits" : limitsDictionary,
         @"clipboard" : @{@"text" : clipboardText ?: @""},
+        @"env" : @{@"bundleIdentifier" : sourceBundleIdentifier ?: @""},
     };
     NSData *requestData = [NSJSONSerialization dataWithJSONObject:request options:0 error:NULL];
     if ([requestData length] == 0) {

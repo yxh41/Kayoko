@@ -48,6 +48,9 @@ static NSString *KayokoScriptPanelLocalized(NSString *key, NSString *fallback) {
 @property(nonatomic, strong) KayokoScriptRunner *runner;
 
 @property(nonatomic, copy) NSString *inputText;
+/// Where the text came from, handed to the script as `$env.bundleIdentifier`. `nil` when the panel was opened
+/// without a history item behind it.
+@property(nonatomic, copy, nullable) NSString *sourceBundleIdentifier;
 @property(nonatomic, copy) NSArray<KayokoScript *> *scripts;
 /// What the list actually shows; a subset of `scripts` while a search query is active, equal to it otherwise.
 @property(nonatomic, copy) NSArray<KayokoScript *> *filteredScripts;
@@ -104,8 +107,9 @@ NS_ASSUME_NONNULL_END
 
 #pragma mark - Entry Points
 
-- (void)beginWithText:(NSString *)text {
+- (void)beginWithText:(NSString *)text sourceBundleIdentifier:(nullable NSString *)sourceBundleIdentifier {
     [self setInputText:text ?: @""];
+    [self setSourceBundleIdentifier:sourceBundleIdentifier];
     [self setActiveScript:nil];
     [self setValues:@[]];
     [self setActionItem:nil];
@@ -175,8 +179,10 @@ NS_ASSUME_NONNULL_END
     NSString *countText = nil;
     switch ([item type]) {
     case KayokoScriptItemTypeURL:
-    case KayokoScriptItemTypeURLInApp:
         actionTitle = KayokoScriptPanelLocalized(@"Open link", @"Open link");
+        break;
+    case KayokoScriptItemTypeURLInApp:
+        actionTitle = KayokoScriptPanelLocalized(@"Open in app", @"Open in app");
         break;
     case KayokoScriptItemTypeApplication: {
         NSString *name = [[self class] displayNameForBundleIdentifier:text];
@@ -264,6 +270,7 @@ NS_ASSUME_NONNULL_END
     [[self runner] runScript:script
                        input:[self inputText]
                clipboardText:[[UIPasteboard generalPasteboard] string]
+       sourceBundleIdentifier:[self sourceBundleIdentifier]
                   completion:^(NSArray<KayokoScriptItem *> *_Nullable items, KayokoScriptFailure *_Nullable failure) {
                     __strong typeof(weakSelf) strongSelf = weakSelf;
                     if (!strongSelf) {
@@ -426,9 +433,13 @@ NS_ASSUME_NONNULL_END
 
     if ([code isEqualToString:@"action-blocked"]) {
         NSString *scheme = [failure stringForKey:@"scheme"];
+        // No scheme at all means the "link" was never a URL (`javascript:alert(1)` is the usual culprit), so
+        // naming the scheme would read as "cannot open a none link".
+        if ([scheme length] == 0) {
+            return KayokoScriptPanelLocalized(@"Not a web link", @"Not a web link");
+        }
         return [NSString
-            stringWithFormat:KayokoScriptPanelLocalized(@"Cannot open a %@ link", @"Cannot open a %@ link"),
-                             scheme ?: @"?"];
+            stringWithFormat:KayokoScriptPanelLocalized(@"Cannot open a %@ link", @"Cannot open a %@ link"), scheme];
     }
 
     if ([code isEqualToString:@"too-many-results"]) {
@@ -526,7 +537,9 @@ NS_ASSUME_NONNULL_END
     if (actionItem) {
         KayokoScriptItemType type = [actionItem type];
         if (type == KayokoScriptItemTypeURL || type == KayokoScriptItemTypeURLInApp) {
-            [[self delegate] scriptPanelController:self didRequestOpenURL:[actionItem content]];
+            [[self delegate] scriptPanelController:self
+                                 didRequestOpenURL:[actionItem content]
+                                            inApp:(type == KayokoScriptItemTypeURLInApp)];
         } else if (type == KayokoScriptItemTypeApplication) {
             [[self delegate] scriptPanelController:self didRequestOpenApplication:[actionItem content]];
         }
@@ -560,13 +573,31 @@ NS_ASSUME_NONNULL_END
 
     if ([self state] == KayokoScriptPanelStateList) {
         KayokoScript *script = [[self filteredScripts] objectAtIndex:(NSUInteger)[indexPath row]];
-        [cell updateWithTitle:[script displayName] truncatesInMiddle:NO];
+        [cell updateWithTitle:[script displayName] badge:nil truncatesInMiddle:NO];
     } else {
         KayokoScriptItem *item = [[self values] objectAtIndex:(NSUInteger)[indexPath row]];
-        [cell updateWithTitle:[item displayTitle] truncatesInMiddle:YES];
+        [cell updateWithTitle:[item displayTitle] badge:[self badgeForItem:item] truncatesInMiddle:YES];
     }
 
     return cell;
+}
+
+/// What tapping the row does, so the candidate list is not a guessing game: `pb` acts on the spot, everything
+/// else opens a page where the user still has to confirm. Plain text gets no badge -- it is the default, and a
+/// pill on every row would just be noise.
+- (nullable NSString *)badgeForItem:(KayokoScriptItem *)item {
+    switch ([item type]) {
+    case KayokoScriptItemTypePasteboard:
+        return KayokoScriptPanelLocalized(@"Copy", @"Copy");
+    case KayokoScriptItemTypeURL:
+    case KayokoScriptItemTypeURLInApp:
+    case KayokoScriptItemTypeApplication:
+        return KayokoScriptPanelLocalized(@"Open", @"Open");
+    case KayokoScriptItemTypeText:
+        return nil;
+    }
+
+    return nil;
 }
 
 #pragma mark - UITableViewDelegate

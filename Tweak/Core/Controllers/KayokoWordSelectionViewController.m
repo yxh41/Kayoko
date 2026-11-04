@@ -267,18 +267,17 @@ NS_ASSUME_NONNULL_END
 - (void)updateScriptButtonState {
     KayokoHeaderView *headerView = [[self wordSelectionView] headerView];
     UIButton *scriptButton = [headerView scriptButton];
-    NSString *content = [[self sourceItem] content];
-    BOOL hasText = [kayokoWordSelectionTextByTrimmingBoundaryNewlines(content) length] > 0;
 
     [headerView updateStyleForButton:scriptButton
                        withImageName:@"terminal"
                            imageSize:kKayokoBackButtonImageSize
                            tintColor:[UIColor labelColor]];
-    // Scripts always run on something, so the entry stays tappable whenever the item carries text; the
-    // selection only decides which slice of it is handed over.
-    [scriptButton setEnabled:hasText];
-    [scriptButton setAlpha:hasText ? 1.0 : 0.35];
-    [scriptButton setHidden:!hasText];
+    // The entry no longer depends on there being a selection: a script is allowed to work on the clipboard
+    // alone, and hiding the button whenever the page had no text made every one of those scripts unreachable.
+    // The selection now only decides which slice arrives as `text`.
+    [scriptButton setEnabled:YES];
+    [scriptButton setAlpha:1.0];
+    [scriptButton setHidden:NO];
 }
 
 - (void)handleScriptButtonPressed {
@@ -288,12 +287,12 @@ NS_ASSUME_NONNULL_END
     }
 
     void (^handler)(NSString *, NSString *) = [self scriptButtonHandler];
-    if ([text length] == 0 || !handler) {
+    if (!handler) {
         return;
     }
 
     [[self delegate] wordSelectionViewController:self triggerHapticFeedbackWithStyle:UIImpactFeedbackStyleLight];
-    handler(text, [self sourceHistoryKey]);
+    handler(text ?: @"", [self sourceHistoryKey]);
 }
 
 - (void)updateSelectionOrderButtonState {

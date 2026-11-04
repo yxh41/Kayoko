@@ -489,6 +489,7 @@ static CGFloat const kKayokoScriptEditorCodeHeight = 300.0;
     [[self runner] runScript:script
                        input:[[self inputField] text] ?: @""
                clipboardText:nil
+       sourceBundleIdentifier:nil
                   completion:^(NSArray<KayokoScriptItem *> *_Nullable items, KayokoScriptFailure *_Nullable failure) {
                     __strong typeof(weakSelf) strongSelf = weakSelf;
                     if (!strongSelf) {

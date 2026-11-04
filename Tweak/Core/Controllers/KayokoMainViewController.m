@@ -29,6 +29,8 @@
 #import "KayokoWordSelectionView.h"
 #import "KayokoWordSelectionViewController.h"
 
+#import <SafariServices/SafariServices.h>
+
 static CGFloat const kKayokoTransientEdgeBackHorizontalDominance = 1.2;
 static CGFloat const kKayokoTransientEdgeBackCompletionProgress = 0.35;
 static CGFloat const kKayokoTransientEdgeBackCompletionVelocity = 650;
@@ -48,7 +50,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface KayokoMainViewController () <KayokoClearConfirmationViewControllerDelegate, KayokoHistoryControllerDelegate,
                                         KayokoPanelPresentationControllerDelegate, KayokoSearchControllerDelegate,
                                         KayokoHistoryListViewControllerDelegate, KayokoNoteEditorViewControllerDelegate,
-                                        KayokoScriptPanelControllerDelegate,
+                                        KayokoScriptPanelControllerDelegate, SFSafariViewControllerDelegate,
                                         KayokoWordSelectionViewControllerDelegate, UIGestureRecognizerDelegate>
 #pragma mark - Views
 
@@ -92,6 +94,13 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign, getter=isDismissingPanel) BOOL dismissingPanel;
 @property(nonatomic, strong) KayokoExternalHideCoordinator *externalHideCoordinator;
 
+#pragma mark - In-App Browser
+
+/// Owns the window the `urlInApp` browser lives in. The panel is itself a child of SpringBoard's status bar
+/// window, so presenting from it would put the browser underneath whatever app is in front; a dedicated window
+/// at alert level is what actually stays on screen.
+@property(nonatomic, strong, nullable) UIWindow *inAppBrowserWindow;
+
 #pragma mark - Transient Content
 
 @property(nonatomic, assign) BOOL restoresSearchFirstResponderAfterTransientContent;
@@ -106,8 +115,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 #pragma mark - Note Editing
 
-@property(nonatomic, strong, nullable) KayokoPasteboardItem *noteEditingItem;
-@property(nonatomic, copy, nullable) NSString *noteEditingHistoryKey;
+@property(nonatomic, strong, nullable) KayokoPasteboardItem *noteEditingItem;@property(nonatomic, copy, nullable) NSString *noteEditingHistoryKey;
 @property(nonatomic, weak, nullable) KayokoHistoryListViewController *noteEditingSourceListViewController;
 @property(nonatomic, assign) NSUInteger noteEditingRequestIdentifier;
 @property(nonatomic, assign) BOOL noteEditingBeganFromSearch;
@@ -122,6 +130,8 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - Script Actions
 
 - (void)openSensitiveURL:(NSURL *)URL;
+- (void)presentInAppBrowserForURL:(NSURL *)URL;
+- (nullable UIWindowScene *)activeWindowScene;
 - (void)launchApplicationWithBundleIdentifier:(NSString *)bundleIdentifier;
 @end
 
@@ -1940,7 +1950,8 @@ NS_ASSUME_NONNULL_END
     }
 
     KayokoScriptPanelView *scriptPanelView = [[self scriptPanelController] panelView];
-    [[self scriptPanelController] beginWithText:text ?: @""];
+    [[self scriptPanelController] beginWithText:text ?: @""
+                         sourceBundleIdentifier:[item bundleIdentifier]];
     [scriptPanelView setHidden:NO];
 
     // Remember which panel opened us: the back button has to unwind to it, not always to the preview.
@@ -2090,29 +2101,35 @@ NS_ASSUME_NONNULL_END
 
 - (void)scriptPanelController:(KayokoScriptPanelController *)controller didRequestCopyText:(NSString *)text {
     (void)controller;
-    KayokoPasteboardItem *sourceItem = [self scriptPanelSourceItem] ?: [[self previewViewController] previewItem];
-    if (!sourceItem || [text length] == 0) {
+    if ([text length] == 0) {
         return;
     }
 
-    KayokoPasteboardItem *item = [[KayokoPasteboardItem alloc] initWithBundleIdentifier:[sourceItem bundleIdentifier]
-                                                                            andContent:text
-                                                                        withImageNamed:nil];
-    [[KayokoPasteboardManager sharedInstance] copyPasteboardItemToPasteboard:item];
+    KayokoPasteboardItem *sourceItem = [self scriptPanelSourceItem] ?: [[self previewViewController] previewItem];
+    [[KayokoPasteboardManager sharedInstance] copyPasteboardItemToPasteboard:[self scriptOutputItemWithText:text
+                                                                                           sourceItem:sourceItem]];
     [[self panelPresentationController] prepareStandardDismissAnimation];
     [self hideAfterDirectPaste];
 }
 
 - (void)scriptPanelController:(KayokoScriptPanelController *)controller didRequestPasteText:(NSString *)text {
     (void)controller;
-    KayokoPasteboardItem *sourceItem = [self scriptPanelSourceItem] ?: [[self previewViewController] previewItem];
-    if (!sourceItem || [text length] == 0) {
+    if ([text length] == 0) {
         return;
     }
 
-    KayokoPasteboardItem *item = [[KayokoPasteboardItem alloc] initWithBundleIdentifier:[sourceItem bundleIdentifier]
-                                                                            andContent:text
-                                                                        withImageNamed:nil];
+    KayokoPasteboardItem *sourceItem = [self scriptPanelSourceItem] ?: [[self previewViewController] previewItem];
+    KayokoPasteboardItem *item = [self scriptOutputItemWithText:text sourceItem:sourceItem];
+
+    // Automatic paste mirrors "copy then return to the app that had focus"; with no source item there is no
+    // such app to return to, so the output just lands on the clipboard.
+    if (!sourceItem) {
+        [[KayokoPasteboardManager sharedInstance] copyPasteboardItemToPasteboard:item];
+        [[self panelPresentationController] prepareStandardDismissAnimation];
+        [self hideAfterDirectPaste];
+        return;
+    }
+
     [[KayokoPasteboardManager sharedInstance] writePasteboardItem:item
                                                 sourceHistoryItem:sourceItem
                                                fromHistoryWithKey:([self scriptPanelSourceHistoryKey] ?:
@@ -2122,7 +2139,24 @@ NS_ASSUME_NONNULL_END
     [self hideAfterDirectPaste];
 }
 
-- (void)scriptPanelController:(KayokoScriptPanelController *)controller didRequestOpenURL:(NSString *)urlString {
+/// A script output is a history item like any other, so it has to carry a source app. Inheriting the source
+/// item's is the useful answer; when the panel was opened without one there is nothing to inherit and the
+/// output is attributed to Kayoko -- an honest label, and never a nil that the write path has to special-case.
+- (KayokoPasteboardItem *)scriptOutputItemWithText:(NSString *)text
+                                        sourceItem:(nullable KayokoPasteboardItem *)sourceItem {
+    NSString *bundleIdentifier = [sourceItem bundleIdentifier];
+    if ([bundleIdentifier length] == 0) {
+        bundleIdentifier = @"com.82flex.kayoko";
+    }
+
+    return [[KayokoPasteboardItem alloc] initWithBundleIdentifier:bundleIdentifier
+                                                      andContent:text
+                                                  withImageNamed:nil];
+}
+
+- (void)scriptPanelController:(KayokoScriptPanelController *)controller
+             didRequestOpenURL:(NSString *)urlString
+                        inApp:(BOOL)inApp {
     (void)controller;
     NSURL *URL = [NSURL URLWithString:urlString];
     if (!URL) {
@@ -2133,7 +2167,11 @@ NS_ASSUME_NONNULL_END
     // window to land in.
     [self hideWithStandardDismissAnimation];
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.25 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-      [self openSensitiveURL:URL];
+      if (inApp) {
+          [self presentInAppBrowserForURL:URL];
+      } else {
+          [self openSensitiveURL:URL];
+      }
     });
 }
 
@@ -2151,6 +2189,77 @@ NS_ASSUME_NONNULL_END
 }
 
 #pragma mark - Script Actions
+
+- (nullable UIWindowScene *)activeWindowScene {
+    UIWindowScene *scene = [[[self view] window] windowScene];
+    if (scene) {
+        return scene;
+    }
+
+    for (UIScene *candidate in [[UIApplication sharedApplication] connectedScenes]) {
+        if ([candidate isKindOfClass:[UIWindowScene class]] &&
+            [candidate activationState] == UISceneActivationStateForegroundActive) {
+            return (UIWindowScene *)candidate;
+        }
+    }
+
+    return nil;
+}
+
+/// `urlInApp`: show the page without leaving the app the panel was opened over.
+- (void)presentInAppBrowserForURL:(NSURL *)URL {
+    UIWindowScene *scene = [self activeWindowScene];
+    if (!scene || ![SFSafariViewController class]) {
+        [self openSensitiveURL:URL];
+        return;
+    }
+
+    UIWindow *window = [[UIWindow alloc] initWithWindowScene:scene];
+    [window setWindowLevel:UIWindowLevelAlert + 1];
+
+    UIViewController *host = [[UIViewController alloc] init];
+    [[host view] setBackgroundColor:[UIColor systemBackgroundColor]];
+    [window setRootViewController:host];
+    [window makeKeyAndVisible];
+    [self setInAppBrowserWindow:window];
+
+    SFSafariViewController *browser = [[SFSafariViewController alloc] initWithURL:URL];
+    [browser setDelegate:self];
+    // The window has to be attached before it can present anything, and `makeKeyAndVisible` only schedules that:
+    // presenting in the same turn is the classic "whose view is not in the window hierarchy" warning.
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [host presentViewController:browser animated:YES completion:nil];
+    });
+
+    // The browser is a remote view service: if it never comes up the user would be left staring at an empty
+    // window, which is worse than the plain "open in Safari" they would have got before. Give it a moment, then
+    // fall back to the system entry point.
+    __weak typeof(self) weakSelf = self;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+      __strong typeof(weakSelf) strongSelf = weakSelf;
+      if (!strongSelf || [strongSelf inAppBrowserWindow] != window) {
+          return;
+      }
+      if ([browser presentingViewController] == nil) {
+          [window setHidden:YES];
+          [strongSelf setInAppBrowserWindow:nil];
+          [strongSelf openSensitiveURL:URL];
+      }
+    });
+}
+
+- (void)safariViewControllerDidFinish:(SFSafariViewController *)controller {
+    __weak typeof(self) weakSelf = self;
+    [controller dismissViewControllerAnimated:YES
+                                   completion:^{
+                                     __strong typeof(weakSelf) strongSelf = weakSelf;
+                                     if (!strongSelf) {
+                                         return;
+                                     }
+                                     [[strongSelf inAppBrowserWindow] setHidden:YES];
+                                     [strongSelf setInAppBrowserWindow:nil];
+                                   }];
+}
 
 - (void)openSensitiveURL:(NSURL *)URL {
     Class workspaceClass = NSClassFromString(@"LSApplicationWorkspace");

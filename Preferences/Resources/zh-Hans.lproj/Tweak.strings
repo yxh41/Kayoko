@@ -153,3 +153,6 @@
 "Item %ld (%@) has no usable content" = "第 %ld 条（%@）没有可用内容";
 "An item has no usable content" = "有条目没有可用内容";
 "Cannot open a %@ link" = "无法打开 %@ 链接";
+"Not a web link" = "不是网页链接";
+"Open" = "打开";
+"Open in app" = "应用内打开";

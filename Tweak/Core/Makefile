@@ -33,6 +33,7 @@ KayokoCore_FRAMEWORKS += CoreGraphics
 KayokoCore_FRAMEWORKS += ImageIO
 KayokoCore_FRAMEWORKS += IOKit
 KayokoCore_FRAMEWORKS += QuartzCore
+KayokoCore_FRAMEWORKS += SafariServices
 KayokoCore_FRAMEWORKS += Security
 KayokoCore_FRAMEWORKS += UIKit
 KayokoCore_PRIVATE_FRAMEWORKS += CoreServices

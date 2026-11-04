@@ -23,10 +23,13 @@ typedef void (^KayokoScriptRunnerCompletion)(NSArray<KayokoScriptItem *> *_Nulla
 
 /// `clipboardText` is pre-read and shipped inside the request, because the executor reads stdin exactly once:
 /// a script that asks the host for the clipboard mid-run would need a second channel it does not have.
+/// `sourceBundleIdentifier` rides along the same way and surfaces as `$env.bundleIdentifier`; pass `nil` when the
+/// text did not come from a history item.
 - (void)runScript:(KayokoScript *)script
-            input:(NSString *)input
+    input:(NSString *)input
     clipboardText:(nullable NSString *)clipboardText
-       completion:(KayokoScriptRunnerCompletion)completion;
+    sourceBundleIdentifier:(nullable NSString *)sourceBundleIdentifier
+    completion:(KayokoScriptRunnerCompletion)completion;
 
 @end
 

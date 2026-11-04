@@ -5,17 +5,23 @@
 //  Runs a single user script against a single input string and prints the result as JSON.
 //
 //  Protocol (v2)
-//    stdin:  {"code": "<javascript source>", "input": "<text>", "clipboard": {"text": "<text>"}, "limits": {...}}
+//    stdin:  {"code": "<javascript source>", "input": "<text>", "clipboard": {"text": "<text>"},
+//             "env": {"bundleIdentifier": "<text>"}, "limits": {...}}
 //    stdout: {"items": [{"type": "txt", "title": "...", "content": "..."}]} or {"error": "...", "code": "..."}
 //
 //  A script has to define a global function `main(text)`. It may return a single string, an array of strings (both
 //  are the v1 shape and stay valid), a dictionary, or an array of dictionaries. Strings become `txt` items; a
 //  dictionary opts into an action (`txt`, `pb`, `url`, `urlInApp`, `app`) and may carry a `title` for the picker.
+//
 //  Scripts can read the clipboard through `$pb.readString()`; it is pre-read by the host before the script starts.
+//  `$env.bundleIdentifier` names the app the text came from (empty when the host has no source), `$base64`
+//  encodes and decodes, and `$md5` hashes. No network, no filesystem, no other host bridge.
 //
 
 #import <Foundation/Foundation.h>
 #import <JavaScriptCore/JavaScriptCore.h>
+
+#import <CommonCrypto/CommonDigest.h>
 
 #import <errno.h>
 #import <pthread.h>
@@ -367,7 +373,11 @@ static NSDictionary<NSString *, id> *kayokoItemFromValue(JSValue *value,
             *errorCode = @"action-blocked";
             *errorMessage = @"Only http and https links can be opened";
             NSMutableDictionary *extras = kayokoItemExtras(itemIndex);
-            [extras setObject:(scheme ?: @"none") forKey:@"scheme"];
+            // A missing scheme stays missing: the host has a separate message for "this is not a web link at
+            // all", and sending the literal string "none" made that page read "cannot open a none link".
+            if ([scheme length] > 0) {
+                [extras setObject:scheme forKey:@"scheme"];
+            }
             *errorExtra = extras;
             return nil;
         }
@@ -487,9 +497,61 @@ static void kayokoParseLimits(NSDictionary *request,
     *maxTotalLength = MIN(*maxResultLength * 4, 2000000);
 }
 
+#pragma mark - Script Helpers
+
+/// JS can hand a number or an undefined to a bridge function; scripts in the wild call `$md5(42)` and expect a
+/// hash of "42" rather than a crash, so every argument is coerced here instead of being cast.
+static NSString *kayokoStringFromJSValue(JSValue *value) {
+    if (!value || [value isUndefined] || [value isNull]) {
+        return @"";
+    }
+
+    return [value toString] ?: @"";
+}
+
+/// CommonCrypto's digest entry points are deprecated on iOS 13 in favour of CryptoKit, which is Swift-only and
+/// therefore not reachable from this C tool. The calls are deliberate, so the diagnostics are silenced around
+/// them rather than the alternative: a hand-rolled MD5 in JavaScript that nobody wants to review.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
+static NSString *kayokoMD5Hex(NSString *text) {
+    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+
+    unsigned char digest[CC_MD5_DIGEST_LENGTH];
+    CC_MD5([data bytes], (CC_LONG)[data length], digest);
+
+    NSMutableString *hex = [[NSMutableString alloc] initWithCapacity:CC_MD5_DIGEST_LENGTH * 2];
+    for (int index = 0; index < CC_MD5_DIGEST_LENGTH; index++) {
+        [hex appendFormat:@"%02x", digest[index]];
+    }
+
+    return hex;
+}
+
+#pragma clang diagnostic pop
+
+static NSString *kayokoBase64Encode(NSString *text) {
+    NSData *data = [text dataUsingEncoding:NSUTF8StringEncoding] ?: [NSData data];
+    return [data base64EncodedStringWithOptions:0] ?: @"";
+}
+
+/// Garbage in gives an empty string, not an exception: a script that decodes the wrong clipboard should be able
+/// to branch on the result instead of dying with "your script is broken".
+static NSString *kayokoBase64Decode(NSString *text) {
+    NSData *data = [[NSData alloc] initWithBase64EncodedString:text
+                                                       options:NSDataBase64DecodingIgnoreUnknownCharacters];
+    if (!data) {
+        return @"";
+    }
+
+    return [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding] ?: @"";
+}
+
 static NSArray<NSDictionary<NSString *, id> *> *kayokoRunScript(NSString *code,
                                                                NSString *input,
                                                                NSString *clipboardText,
+                                                               NSString *sourceBundleIdentifier,
                                                                NSUInteger maxResults,
                                                                NSUInteger maxResultLength,
                                                                NSUInteger maxTotalLength,
@@ -514,7 +576,28 @@ static NSArray<NSDictionary<NSString *, id> *> *kayokoRunScript(NSString *code,
     }
                 forKeyedSubscript:@"__kayokoClipboardText"];
 
-    // Scripts get a console shim and a read-only clipboard; there is no filesystem, network or host bridge.
+    [context setObject:^NSString *(void) {
+      return sourceBundleIdentifier ?: @"";
+    }
+                forKeyedSubscript:@"__kayokoSourceBundleIdentifier"];
+
+    [context setObject:^NSString *(JSValue *value) {
+      return kayokoBase64Encode(kayokoStringFromJSValue(value));
+    }
+                forKeyedSubscript:@"__kayokoBase64Encode"];
+
+    [context setObject:^NSString *(JSValue *value) {
+      return kayokoBase64Decode(kayokoStringFromJSValue(value));
+    }
+                forKeyedSubscript:@"__kayokoBase64Decode"];
+
+    [context setObject:^NSString *(JSValue *value) {
+      return kayokoMD5Hex(kayokoStringFromJSValue(value));
+    }
+                forKeyedSubscript:@"__kayokoMD5"];
+
+    // Scripts get a console shim, a read-only clipboard, read-only environment facts and two pure helpers;
+    // there is still no filesystem, network or host bridge.
     [context evaluateScript:@"var console = {"
                               @"  log: function () { __kayokoLog(Array.prototype.slice.call(arguments).map(String).join(' ')); },"
                               @"  info: function () { console.log.apply(console, arguments); },"
@@ -522,7 +605,13 @@ static NSArray<NSDictionary<NSString *, id> *> *kayokoRunScript(NSString *code,
                               @"  error: function () { console.log.apply(console, arguments); },"
                               @"  debug: function () { console.log.apply(console, arguments); }"
                               @"};"
-                              @"var $pb = { readString: function () { return __kayokoClipboardText(); } };"];
+                              @"var $pb = { readString: function () { return __kayokoClipboardText(); } };"
+                              @"var $env = { bundleIdentifier: __kayokoSourceBundleIdentifier() };"
+                              @"var $base64 = {"
+                              @"  encode: function (value) { return __kayokoBase64Encode(value); },"
+                              @"  decode: function (value) { return __kayokoBase64Decode(value); }"
+                              @"};"
+                              @"function $md5(value) { return __kayokoMD5(value); }"];
 
     [context evaluateScript:code];
     if ([context exception]) {
@@ -619,6 +708,15 @@ int main(int argc, char *argv[]) {
             }
         }
 
+        id environment = [request objectForKey:@"env"];
+        NSString *sourceBundleIdentifier = @"";
+        if ([environment isKindOfClass:[NSDictionary class]]) {
+            id rawBundleIdentifier = [(NSDictionary *)environment objectForKey:@"bundleIdentifier"];
+            if ([rawBundleIdentifier isKindOfClass:[NSString class]]) {
+                sourceBundleIdentifier = rawBundleIdentifier;
+            }
+        }
+
         pthread_t watchdog = (pthread_t)0;
         if (pthread_create(&watchdog, NULL, kayokoWatchdogMain, &timeout) == 0) {
             pthread_detach(watchdog);
@@ -628,8 +726,8 @@ int main(int argc, char *argv[]) {
         NSString *errorMessage = nil;
         NSDictionary<NSString *, id> *errorExtra = nil;
         NSArray<NSDictionary<NSString *, id> *> *items =
-            kayokoRunScript(code, text, clipboardText, maxResults, maxResultLength, maxTotalLength, &errorCode,
-                            &errorMessage, &errorExtra);
+            kayokoRunScript(code, text, clipboardText, sourceBundleIdentifier, maxResults, maxResultLength,
+                            maxTotalLength, &errorCode, &errorMessage, &errorExtra);
         if (!items) {
             kayokoEmitError(errorCode, errorMessage, errorExtra);
             return 1;

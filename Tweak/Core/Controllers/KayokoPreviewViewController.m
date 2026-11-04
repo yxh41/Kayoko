@@ -116,7 +116,9 @@ NS_ASSUME_NONNULL_END
     [scriptButton addTarget:self
                      action:@selector(handleScriptButtonPressed)
            forControlEvents:UIControlEventTouchUpInside];
-    [scriptButton setHidden:[[item imageName] length] > 0 || [[item content] length] == 0];
+    // Images carry no text to hand a script, so that is the only case where the entry goes away. An empty text
+    // item still gets it: the script may only be interested in the clipboard.
+    [scriptButton setHidden:[[item imageName] length] > 0];
 }
 
 #pragma mark - Tags

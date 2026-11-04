@@ -12,8 +12,13 @@ NS_ASSUME_NONNULL_BEGIN
 @interface KayokoScriptListCell : UITableViewCell
 
 @property(nonatomic, strong, readonly) UILabel *titleLabel;
+/// Optional pill on the right edge. The candidate list uses it to say what tapping the row will do
+/// ("copy" / "open") before the user commits to it.
+@property(nonatomic, strong, readonly) UILabel *badgeLabel;
 
-- (void)updateWithTitle:(NSString *)title truncatesInMiddle:(BOOL)truncatesInMiddle;
+- (void)updateWithTitle:(NSString *)title
+                  badge:(nullable NSString *)badge
+      truncatesInMiddle:(BOOL)truncatesInMiddle;
 
 @end
 
