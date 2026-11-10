@@ -14,6 +14,7 @@
 #import "KayokoPasteboardItem.h"
 #import "KayokoPasteboardManager.h"
 #import "KayokoPreferenceKeys.h"
+#import "ClippaPinning.h"
 
 /// ShellX's own integration notes name this class as the way to detect it.
 static NSString *const kKayokoShellXPluginManagerClassName = @"SHELLXPluginManager";
@@ -54,6 +55,27 @@ static NSString *const kKayokoShellXOpenLastNotification = @"com.iosdump.screens
 /// Snapper 3's equivalent.
 static NSString *const kKayokoSnapper3OpenLastNotification = @"com.jontelang.snapper3.openlast";
 
+/// Clippa publishes a real pin call in ClippaPinning.h. The class lives in
+/// SpringBoard - the same process KayokoCore is injected into - and takes the
+/// UIImage directly, so none of the history-folder / openlast / window-walking
+/// work the other two hosts need applies here.
+static NSString *const kKayokoClippaPinningControllerClassName = @"ClippaPinningController";
+
+/// Pure-ASCII marker: it survives in __cstring of the arm64e binary, so the
+/// release verifier can prove this path was actually compiled in (4.3.41).
+static NSString *const kKayokoClippaPinningNote = @"KayokoClippaPin-4.3.41";
+
+/// A local, link-free view of Clippa's published class methods. Typing the
+/// receiver as a protocol keeps the call sites checked by the compiler without
+/// ever referencing the ClippaPinningController class symbol: Kayoko must still
+/// load when Clippa is not installed.
+@protocol KayokoClippaPinning <NSObject>
++ (BOOL)isAvailable;
++ (BOOL)pinImage:(UIImage *)image
+    initialFrame:(CGRect)initialFrame
+           error:(NSError * _Nullable * _Nullable)error;
+@end
+
 static NSString *const kKayokoFloatLogPath = @"/var/mobile/Library/com.82flex.kayoko/float.log";
 
 /// Present means "diagnostics on". Absent (the normal case) means the log writer
@@ -72,6 +94,8 @@ static NSString *const kKayokoFloatDebugMarkerPath = @"/var/mobile/Library/com.8
 
 + (BOOL)floatWithShellXInMemory:(UIImage *)image;
 + (BOOL)floatWithSnapper3InMemory:(UIImage *)image;
++ (BOOL)floatWithClippa:(UIImage *)image;
++ (nullable UIImage *)clippaSafeImage:(UIImage *)image;
 
 + (NSArray<UIWindow *> *)applicationWindows;
 + (nullable UIWindowScene *)activeWindowScene;
@@ -202,7 +226,8 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
 
 + (KayokoFloatTarget)target {
     NSInteger value = [[self preferences] integerForKey:kKayokoPreferenceKeyFloatTarget];
-    if (value != KayokoFloatTargetShellX && value != KayokoFloatTargetSnapper3) {
+    if (value != KayokoFloatTargetShellX && value != KayokoFloatTargetSnapper3 &&
+        value != KayokoFloatTargetClippa) {
         return (KayokoFloatTarget)kKayokoPreferenceKeyFloatTargetDefaultValue;
     }
     return (KayokoFloatTarget)value;
@@ -212,9 +237,16 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
 /// The documented plugin manager is accepted as a secondary signal so a future
 /// host build that renames the internal class still shows the button.
 + (BOOL)isHostInstalled:(KayokoFloatTarget)target {
-    NSArray<NSString *> *classNames = target == KayokoFloatTargetShellX
-                                          ? @[ kKayokoShellXFloatingManagerClassName, kKayokoShellXPluginManagerClassName ]
-                                          : @[ kKayokoSnapper3WindowClassName, kKayokoSnapper3PluginManagerClassName ];
+    NSArray<NSString *> *classNames = nil;
+    if (target == KayokoFloatTargetClippa) {
+        // This is the class pinImage:initialFrame:error: is sent to; detecting
+        // ClippaPluginManager instead would show a button that cannot pin.
+        classNames = @[ kKayokoClippaPinningControllerClassName ];
+    } else if (target == KayokoFloatTargetShellX) {
+        classNames = @[ kKayokoShellXFloatingManagerClassName, kKayokoShellXPluginManagerClassName ];
+    } else {
+        classNames = @[ kKayokoSnapper3WindowClassName, kKayokoSnapper3PluginManagerClassName ];
+    }
 
     for (NSString *className in classNames) {
         if (objc_getClass([className UTF8String]) != NULL) {
@@ -330,6 +362,17 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
 
     KayokoFloatTarget target = [self target];
 
+    if (target == KayokoFloatTargetClippa) {
+        // Clippa builds its own high-level window. Give the swipe action one
+        // clean runloop turn to finish unwinding before it is summoned, same as
+        // ShellX. There is no history fallback: pinImage either pins or reports
+        // why it could not.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.4 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self floatWithClippa:image];
+        });
+        return;
+    }
+
     if (target == KayokoFloatTargetSnapper3) {
         // Both hosts can be handed the UIImage itself, which is the only way to
         // end up with exactly the tapped item.
@@ -357,6 +400,10 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
 /// reopen "the last one". That is a date comparison rather than a direct
 /// hand-off, so it is only reached when the in-memory call was unavailable.
 + (void)fallBackToHistoryWithImage:(UIImage *)image target:(KayokoFloatTarget)target {
+    if (target == KayokoFloatTargetClippa) {
+        return;
+    }
+
     NSString *directory = [self historyDirectoryForTarget:target];
     if ([directory length] == 0) {
         KayokoFloatLog(@"fallback", @"no history directory");
@@ -382,6 +429,71 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
     KayokoFloatLog(@"fallback", [NSString stringWithFormat:@"posted %@", notificationName]);
 }
 
+#pragma mark - Clippa pinning
+
+/// Clippa caps the picture at 4096 px on the long edge and 16 MP in total.
+/// Shrink once up front so a long screenshot is not rejected, and redraw once
+/// when the source has no CGImage (Clippa requires one).
++ (nullable UIImage *)clippaSafeImage:(UIImage *)image {
+    CGFloat scale = MAX(1.0, image.scale);
+    CGFloat width = image.size.width * scale;
+    CGFloat height = image.size.height * scale;
+    if (width < 1.0 || height < 1.0) {
+        return nil;
+    }
+
+    CGFloat longest = MAX(width, height);
+    CGFloat pixels = width * height;
+    CGFloat factor = MIN(1.0, MIN(4096.0 / longest, sqrt(16000000.0 / pixels)));
+    if (image.CGImage && factor >= 1.0) {
+        return image;
+    }
+
+    CGSize pointSize = CGSizeMake(MAX(1.0, floor(image.size.width * factor)),
+                                 MAX(1.0, floor(image.size.height * factor)));
+    UIGraphicsBeginImageContextWithOptions(pointSize, NO, scale);
+    [image drawInRect:CGRectMake(0.0, 0.0, pointSize.width, pointSize.height)];
+    UIImage *redrawn = UIGraphicsGetImageFromCurrentImageContext();
+    UIGraphicsEndImageContext();
+    return redrawn;
+}
+
+/// Hands the picture to Clippa's published pin call. The class is looked up by
+/// name and never linked, so Kayoko still loads when Clippa is not installed.
++ (BOOL)floatWithClippa:(UIImage *)image {
+    Class<KayokoClippaPinning> controller =
+        (Class<KayokoClippaPinning>)NSClassFromString(kKayokoClippaPinningControllerClassName);
+    if (!controller || ![controller respondsToSelector:@selector(isAvailable)] ||
+        ![controller respondsToSelector:@selector(pinImage:initialFrame:error:)]) {
+        KayokoFloatLog(@"clippa", @"pinning controller missing");
+        return NO;
+    }
+
+    UIImage *picture = [self clippaSafeImage:image];
+    if (!picture) {
+        KayokoFloatLog(@"clippa", @"picture could not be prepared");
+        return NO;
+    }
+
+    // isAvailable is only a side-effect-free pre-check; the SDK says the pin
+    // result is what counts, so a NO here is logged but does not stop the call.
+    if (![controller isAvailable]) {
+        KayokoFloatLog(@"clippa", @"host reports not ready, trying anyway");
+    }
+
+    NSError *error = nil;
+    BOOL pinned = [controller pinImage:picture initialFrame:CGRectZero error:&error];
+    if (!pinned) {
+        KayokoFloatLog(@"clippa",
+                       [NSString stringWithFormat:@"pinImage failed (%ld): %@", (long)error.code,
+                                                  error.domain ?: @"no error"]);
+        return NO;
+    }
+
+    KayokoFloatLog(@"clippa", kKayokoClippaPinningNote);
+    return YES;
+}
+
 /// Shared sizing: about two thirds of the screen, centred, never upscaled.
 + (CGRect)floatingFrameForImage:(UIImage *)image {
     CGSize screenSize = [UIScreen mainScreen].bounds.size;
@@ -405,6 +517,10 @@ static void KayokoFloatLog(NSString *step, NSString *detail) {
 /// cached: a wrong guess would only cost one respring, and scanning
 /// `/var/mobile/Library` on every swipe would be wasteful.
 + (nullable NSString *)historyDirectoryForTarget:(KayokoFloatTarget)target {
+    if (target == KayokoFloatTargetClippa) {
+        return nil;
+    }
+
     if (target == KayokoFloatTargetSnapper3) {
         return jbroot(@"/var/mobile/Library/Snapper3/Images/");
     }

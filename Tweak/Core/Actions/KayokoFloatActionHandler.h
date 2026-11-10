@@ -12,16 +12,19 @@ NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSUInteger, KayokoFloatTarget) {
     KayokoFloatTargetShellX = 0,
-    KayokoFloatTargetSnapper3 = 1
+    KayokoFloatTargetSnapper3 = 1,
+    KayokoFloatTargetClippa = 2
 };
 
-/// Turns a clipboard item into a floating image, hosted by ShellX or Snapper 3.
+/// Turns a clipboard item into a floating image, hosted by ShellX, Snapper 3 or
+/// Clippa. Nothing else happens: the picture is pinned and Kayoko closes.
 ///
-/// Neither package publishes a "pin this image" call: their documented surfaces
-/// only cover opening their own capture flow and floating the newest entry of
-/// their own history. So the route is to drop the picture into the host's
-/// history folder and then ask it to float the last one. A host that cannot be
-/// reached makes the swipe action disappear instead of failing silently.
+/// ShellX and Snapper 3 publish no "pin this image" call, so their route drops
+/// the picture into the host's history folder and asks it to float the last one.
+/// Clippa does publish `pinImage:initialFrame:error:` (ClippaPinning.h), so it
+/// takes the UIImage directly with no history folder and no Darwin notification.
+/// A host that cannot be reached makes the swipe action disappear instead of
+/// failing silently.
 @interface KayokoFloatActionHandler : NSObject
 
 /// Whether the user wants the left-swipe action at all.
