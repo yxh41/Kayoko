@@ -156,3 +156,19 @@
 "Not a web link" = "不是网页链接";
 "Open" = "打开";
 "Open in app" = "应用内打开";
+
+"Pasteboard Summary" = "剪贴板";
+"Pasteboard Summary Count" = "%lu 项";
+"Pasteboard Summary Empty" = "剪贴板当前为空。";
+"Pasteboard Summary Hint" = "长按顶部横条查看当前剪贴板内容，点击空白处关闭。";
+"Pasteboard Summary Done" = "完成";
+"Pasteboard Summary More" = "还有 %lu 项";
+"Pasteboard Summary Characters" = "%lu 字";
+"Pasteboard Summary Pixels" = "%lu × %lu px · %@";
+"Pasteboard Summary Points" = "%lu × %lu pt · 内存图片";
+"Pasteboard Summary Formats" = "%lu 种格式";
+"Pasteboard Summary Kind Text" = "文本";
+"Pasteboard Summary Kind Link" = "链接";
+"Pasteboard Summary Kind Image" = "图片";
+"Pasteboard Summary Kind Rich Text" = "富文本";
+"Pasteboard Summary Kind Other" = "其他";

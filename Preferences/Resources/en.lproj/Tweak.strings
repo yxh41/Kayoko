@@ -145,3 +145,19 @@
 "Maximum results" = "Maximum results";
 "Maximum length per result" = "Maximum length per result";
 "Could Not Save Limits" = "Could Not Save Limits";
+
+"Pasteboard Summary" = "Clipboard";
+"Pasteboard Summary Count" = "%lu items";
+"Pasteboard Summary Empty" = "The clipboard is empty.";
+"Pasteboard Summary Hint" = "Long press the grabber to inspect the current pasteboard (4.3.42). Tap outside to close.";
+"Pasteboard Summary Done" = "Done";
+"Pasteboard Summary More" = "+ %lu more";
+"Pasteboard Summary Characters" = "%lu characters";
+"Pasteboard Summary Pixels" = "%lu x %lu px · %@";
+"Pasteboard Summary Points" = "%lu x %lu pt · in memory";
+"Pasteboard Summary Formats" = "%lu formats";
+"Pasteboard Summary Kind Text" = "Text";
+"Pasteboard Summary Kind Link" = "Link";
+"Pasteboard Summary Kind Image" = "Image";
+"Pasteboard Summary Kind Rich Text" = "Rich Text";
+"Pasteboard Summary Kind Other" = "Other";

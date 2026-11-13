@@ -71,6 +71,20 @@ NS_ASSUME_NONNULL_END
     [recognizer setCancelsTouchesInView:NO];
     [recognizer setDelegate:self];
     [headerView addGestureRecognizer:recognizer];
+
+    // 4.3.42: long press inspects the current pasteboard. It goes on the same
+    // header view so shouldReceiveTouch: applies the identical grabber hit
+    // region, and the tap is held back until this recognizer fails. Without
+    // that dependency a long press would also run the dismiss on finger-up.
+    UILongPressGestureRecognizer *longPressRecognizer = [[UILongPressGestureRecognizer alloc]
+        initWithTarget:self
+                action:@selector(handleGrabberLongPressGestureRecognizer:)];
+    [longPressRecognizer setMinimumPressDuration:0.45];
+    [longPressRecognizer setAllowableMovement:12];
+    [longPressRecognizer setCancelsTouchesInView:NO];
+    [longPressRecognizer setDelegate:self];
+    [headerView addGestureRecognizer:longPressRecognizer];
+    [recognizer requireGestureRecognizerToFail:longPressRecognizer];
 }
 
 #pragma mark - State
@@ -404,6 +418,16 @@ NS_ASSUME_NONNULL_END
     }
 
     [[self delegate] panelPresentationControllerDidTapGrabberArea:self];
+}
+
+- (void)handleGrabberLongPressGestureRecognizer:(UILongPressGestureRecognizer *)recognizer {
+    // Only the Began transition opens the summary: Changed / Ended arrive for
+    // the same touch and would otherwise re-present the popover repeatedly.
+    if ([recognizer state] != UIGestureRecognizerStateBegan) {
+        return;
+    }
+
+    [[self delegate] panelPresentationControllerDidLongPressGrabberArea:self];
 }
 
 #pragma mark - Presentation

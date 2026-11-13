@@ -17,6 +17,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)panelPresentationControllerDidRequestDismiss:(KayokoPanelPresentationController *)controller;
 - (void)panelPresentationControllerDidTapGrabberArea:(KayokoPanelPresentationController *)controller;
+/// 4.3.42: a long press on the grabber area shows the read-only clipboard
+/// summary instead of dismissing the panel. The tap waits for this recognizer
+/// to fail, so the two can never both fire for the same touch.
+- (void)panelPresentationControllerDidLongPressGrabberArea:(KayokoPanelPresentationController *)controller;
 - (BOOL)panelPresentationControllerShouldHandleFullscreenSearchPan:(KayokoPanelPresentationController *)controller;
 - (BOOL)panelPresentationController:(KayokoPanelPresentationController *)controller
     shouldBeginExpandedPanelPanFromView:(nullable UIView *)view

@@ -19,6 +19,7 @@
 #import "KayokoPanelPresentationController.h"
 #import "KayokoPasteboardItem.h"
 #import "KayokoPasteboardManager.h"
+#import "KayokoPasteboardSummary.h"
 #import "KayokoPreviewView.h"
 #import "KayokoPreviewViewController.h"
 #import "KayokoSearchController.h"
@@ -93,6 +94,13 @@ NS_ASSUME_NONNULL_BEGIN
 @property(nonatomic, assign) NSUInteger showRequestIdentifier;
 @property(nonatomic, assign, getter=isDismissingPanel) BOOL dismissingPanel;
 @property(nonatomic, strong) KayokoExternalHideCoordinator *externalHideCoordinator;
+
+#pragma mark - Pasteboard Summary (4.3.42)
+
+/// Transient popover over the panel. Nil unless a grabber long press opened it.
+@property(nonatomic, strong, nullable) KayokoPasteboardSummaryView *pasteboardSummaryView;
+
+- (void)dismissPasteboardSummaryAnimated:(BOOL)animated;
 
 #pragma mark - In-App Browser
 
@@ -563,6 +571,35 @@ NS_ASSUME_NONNULL_END
     }
 }
 
+#pragma mark - Pasteboard Summary
+
+- (void)panelPresentationControllerDidLongPressGrabberArea:(KayokoPanelPresentationController *)controller {
+    if ([self isHidden] || [self pasteboardSummaryView]) {
+        return;
+    }
+
+    // Deliberately does not go through KayokoPasteboardManager's pull path:
+    // that one advances changeCount, writes images to disk, inserts history
+    // rows and applies the blacklist. A peek must not change any of that.
+    KayokoPasteboardSummaryView *summaryView = [[KayokoPasteboardSummaryView alloc] init];
+    __weak typeof(self) weakSelf = self;
+    [summaryView setDismissHandler:^{
+      [weakSelf dismissPasteboardSummaryAnimated:YES];
+    }];
+    [summaryView showInView:[self mainView] animated:YES];
+    [self setPasteboardSummaryView:summaryView];
+    [[self panelPresentationController] triggerHapticFeedbackWithStyle:UIImpactFeedbackStyleMedium];
+}
+
+- (void)dismissPasteboardSummaryAnimated:(BOOL)animated {
+    KayokoPasteboardSummaryView *summaryView = [self pasteboardSummaryView];
+    if (!summaryView) {
+        return;
+    }
+    [self setPasteboardSummaryView:nil];
+    [summaryView dismissAnimated:animated];
+}
+
 - (BOOL)panelPresentationControllerShouldHandleFullscreenSearchPan:(KayokoPanelPresentationController *)controller {
     return ![self isNoteEditing] && [self presentationMode] != KayokoPanelPresentationModeCompactLandscapeFullscreen &&
            [[self searchController] isSearchActive];
@@ -575,6 +612,11 @@ NS_ASSUME_NONNULL_END
     (void)view;
     (void)velocity;
     if ([self isHidden] || [[self panelPresentationController] isAnimating]) {
+        return NO;
+    }
+    // 4.3.42: while the clipboard summary is up, a downward drag must not
+    // dismiss the panel underneath it; tap outside to close the popover first.
+    if ([self pasteboardSummaryView]) {
         return NO;
     }
     if ([self isNoteEditing]) {
@@ -2538,6 +2580,9 @@ NS_ASSUME_NONNULL_END
 
 - (void)completeHideAfterShowingTransientContent:(BOOL)wasShowingTransientContent
                                       completion:(void (^)(void))completion {
+    // Every hide path converges here, including hideImmediately and the
+    // external-hide coordinator. Never leave the popover over a hidden panel.
+    [self dismissPasteboardSummaryAnimated:NO];
     [self restoreActiveSourceContentView];
     [[[self mainView] headerView] setHidden:NO];
     [[[self mainView] headerView] setAlpha:1.0];
