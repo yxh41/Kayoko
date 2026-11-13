@@ -606,20 +606,21 @@ NS_ASSUME_NONNULL_END
           completion(YES, [[strongSelf activeListViewController] items] ?: @[]);
           return;
       }
-      // 4.3.46: a category delete fans out to one removeItemDictionary: per
-      // entry. The final completion reports the freshly read list, which is the
-      // authoritative post-deletion state regardless of any duplicate content.
+      // 4.3.47: a category delete fans out to one persistently-backed removal
+      // per entry (SQL DELETE via the action handler), so the deletion survives
+      // a respring. Each call also keeps the in-memory store in sync, and the
+      // final completion reports the freshly read list.
       for (NSDictionary<NSString *, id> *item in safeItems) {
-          [[strongSelf activeListViewController] removeItemDictionary:item
-                                                          completion:^(BOOL removed) {
-                                                            (void)removed;
-                                                            remaining--;
-                                                            if (remaining == 0) {
-                                                                NSArray<NSDictionary<NSString *, id> *> *fresh =
-                                                                    [[strongSelf activeListViewController] items] ?: @[];
-                                                                completion(YES, fresh);
-                                                            }
-                                                          }];
+          [[strongSelf activeListViewController] deleteItemDictionaryPersistently:item
+                                                                      completion:^(BOOL removed) {
+                                                                        (void)removed;
+                                                                        remaining--;
+                                                                        if (remaining == 0) {
+                                                                            NSArray<NSDictionary<NSString *, id> *> *fresh =
+                                                                                [[strongSelf activeListViewController] items] ?: @[];
+                                                                            completion(YES, fresh);
+                                                                        }
+                                                                      }];
       }
     }];
     [summaryView showInView:[self mainView] items:items animated:YES];

@@ -76,6 +76,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// buttons can refresh themselves from the completion instead of guessing.
 - (void)removeItemDictionary:(NSDictionary<NSString *, id> *)dictionary
                   completion:(nullable void (^)(BOOL success))completion;
+/// 4.3.47: persistently deletes an item (SQL-backed, survives a respring) and
+/// then updates the in-memory store - the same path the swipe-to-delete action
+/// uses. The grabber summary's category delete must go through this so the
+/// deletion is not merely visual until the next reload.
+- (void)deleteItemDictionaryPersistently:(NSDictionary<NSString *, id> *)dictionary
+                              completion:(nullable void (^)(BOOL success))completion;
 - (void)removeItemAtIndexPath:(NSIndexPath *)indexPath completion:(nullable void (^)(BOOL success))completion;
 - (void)updateTagUUID:(nullable NSString *)tagUUID forItem:(KayokoPasteboardItem *)item;
 - (void)updateNote:(nullable NSString *)note

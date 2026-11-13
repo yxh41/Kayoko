@@ -863,6 +863,30 @@ NS_ASSUME_NONNULL_END
         }];
 }
 
+- (void)deleteItemDictionaryPersistently:(NSDictionary<NSString *, id> *)dictionary
+                              completion:(void (^)(BOOL success))completion {
+    if (!dictionary) {
+        if (completion) {
+            completion(NO);
+        }
+        return;
+    }
+    KayokoPasteboardItem *item = [KayokoPasteboardItem itemFromDictionary:dictionary];
+    // The SQL-backed removal is what makes the delete survive a respring; the
+    // in-memory removeItemDictionary: only keeps the table/summary in sync.
+    [[self actionHandler] deleteItem:item
+                          historyKey:[self historyKey]
+                          completion:^(BOOL persisted) {
+                            if (!persisted) {
+                                if (completion) {
+                                    completion(NO);
+                                }
+                                return;
+                            }
+                            [self removeItemDictionary:dictionary completion:completion];
+                          }];
+}
+
 - (void)updateTagUUID:(NSString *)tagUUID forItem:(KayokoPasteboardItem *)item {
     if (!item) {
         return;
