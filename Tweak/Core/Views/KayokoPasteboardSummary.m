@@ -321,6 +321,9 @@ NS_ASSUME_NONNULL_END
     UIScrollView *scrollView = [[UIScrollView alloc] init];
     [scrollView setShowsVerticalScrollIndicator:YES];
     [scrollView setAlwaysBounceVertical:NO];
+    // 4.3.45: content is edge-pinned to the scroll view because the SDK
+    // headers lack the modern guide properties; the tag below marks the build.
+    [scrollView setAccessibilityIdentifier:@"KayokoSummaryScrollEdgePins-4.3.45"];
     [root addArrangedSubview:scrollView];
     [scrollView setTranslatesAutoresizingMaskIntoConstraints:NO];
     // A UIScrollView has no intrinsic height, so without an explicit preferred
@@ -345,11 +348,11 @@ NS_ASSUME_NONNULL_END
     [self setGroupsStackView:groupsStack];
     [groupsStack setTranslatesAutoresizingMaskIntoConstraints:NO];
     [NSLayoutConstraint activateConstraints:@[
-        [[groupsStack topAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide] topAnchor],
-        [[groupsStack leadingAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide] leadingAnchor],
-        [[groupsStack trailingAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide] trailingAnchor],
-        [[groupsStack bottomAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide] bottomAnchor],
-        [[groupsStack widthAnchor] constraintEqualToAnchor:[scrollView frameLayoutGuide] widthAnchor]
+        [[groupsStack topAnchor] constraintEqualToAnchor:[scrollView topAnchor]],
+        [[groupsStack leadingAnchor] constraintEqualToAnchor:[scrollView leadingAnchor]],
+        [[groupsStack trailingAnchor] constraintEqualToAnchor:[scrollView trailingAnchor]],
+        [[groupsStack bottomAnchor] constraintEqualToAnchor:[scrollView bottomAnchor]],
+        [[groupsStack widthAnchor] constraintEqualToAnchor:[scrollView widthAnchor]]
     ]];
 
     UILabel *hintLabel = [[UILabel alloc] init];
