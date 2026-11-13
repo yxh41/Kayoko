@@ -157,12 +157,15 @@
 "Open" = "打开";
 "Open in app" = "应用内打开";
 
-"Pasteboard Summary" = "剪贴板";
-"Pasteboard Summary Count" = "%lu 项";
-"Pasteboard Summary Empty" = "剪贴板当前为空。";
-"Pasteboard Summary Hint" = "长按顶部横条查看当前剪贴板内容，点击空白处关闭。";
+"Pasteboard Summary" = "历史记录统计";
+"Pasteboard Summary Count" = "%lu 条记录";
+"Pasteboard Summary Empty" = "历史记录为空。";
+"Pasteboard Summary Hint" = "长按顶部横条查看历史记录分类，点垃圾桶删除单条。收藏页不可用。";
 "Pasteboard Summary Done" = "完成";
-"Pasteboard Summary More" = "还有 %lu 项";
+"Pasteboard Summary More" = "还有 %lu 条";
+"Pasteboard Summary Chip" = "%@ × %lu";
+"Pasteboard Summary Delete" = "删除";
+"Pasteboard Summary Untitled" = "（无预览）";
 "Pasteboard Summary Characters" = "%lu 字";
 "Pasteboard Summary Pixels" = "%lu × %lu px · %@";
 "Pasteboard Summary Points" = "%lu × %lu pt · 内存图片";

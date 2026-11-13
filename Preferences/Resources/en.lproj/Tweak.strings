@@ -146,15 +146,18 @@
 "Maximum length per result" = "Maximum length per result";
 "Could Not Save Limits" = "Could Not Save Limits";
 
-"Pasteboard Summary" = "Clipboard";
+"Pasteboard Summary" = "History Breakdown";
 "Pasteboard Summary Count" = "%lu items";
-"Pasteboard Summary Empty" = "The clipboard is empty.";
-"Pasteboard Summary Hint" = "Long press the grabber to inspect the current pasteboard (4.3.42). Tap outside to close.";
+"Pasteboard Summary Empty" = "History is empty.";
+"Pasteboard Summary Hint" = "Long press the grabber for a breakdown of History. Tap the trash icon to delete one row. Not available in Favorites.";
 "Pasteboard Summary Done" = "Done";
 "Pasteboard Summary More" = "+ %lu more";
+"Pasteboard Summary Chip" = "%@ x %lu";
+"Pasteboard Summary Delete" = "Delete";
+"Pasteboard Summary Untitled" = "(no preview)";
 "Pasteboard Summary Characters" = "%lu characters";
-"Pasteboard Summary Pixels" = "%lu x %lu px · %@";
-"Pasteboard Summary Points" = "%lu x %lu pt · in memory";
+"Pasteboard Summary Pixels" = "%lu x %lu px | %@";
+"Pasteboard Summary Points" = "%lu x %lu pt | in memory";
 "Pasteboard Summary Formats" = "%lu formats";
 "Pasteboard Summary Kind Text" = "Text";
 "Pasteboard Summary Kind Link" = "Link";

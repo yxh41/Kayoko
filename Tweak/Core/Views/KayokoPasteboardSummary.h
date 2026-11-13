@@ -2,33 +2,51 @@
 //  KayokoPasteboardSummary.h
 //  Kayoko
 //
-//  A read-only look at what the system pasteboard is holding right now.
+//  A grouped breakdown of Kayoko's own history rows, with per-row deletion.
 //
 
 #import <UIKit/UIKit.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
-/// Never call KayokoPasteboardManager's pull path from here: that one advances
-/// the change count, honours saveImages/saveText, writes history rows and runs
-/// the blacklist. This snapshot only reads UIPasteboard's item dictionaries, so
-/// opening it can never add, drop or duplicate a history entry. Images are
-/// inspected through ImageIO headers, never decoded into a UIImage.
+typedef NS_ENUM(NSUInteger, KayokoSummaryKind) {
+    KayokoSummaryKindImage = 0,
+    KayokoSummaryKindText,
+    KayokoSummaryKindLink,
+    KayokoSummaryKindRichText,
+    KayokoSummaryKindOther,
+    KayokoSummaryKindCount
+};
+
+/// The owner performs the deletion (only it owns the data store) and returns a
+/// fresh items array so the popover can rebuild itself.
+typedef void (^KayokoSummaryDeleteCompletion)(BOOL success,
+                                              NSArray<NSDictionary<NSString *, id> *> *freshItems);
+
 @interface KayokoPasteboardSummary : NSObject
 
-/// One dictionary per pasteboard item: index, kindKey, kindFallback,
-/// detail, preview and typeCount. The count of this array is numberOfItems.
-+ (NSArray<NSDictionary<NSString *, id> *> *)entries;
+/// Classify one stored history dictionary. The original dictionary is carried
+/// through untouched: that exact object is what -removeItemDictionary: needs.
++ (NSDictionary<NSString *, id> *)entryForItem:(NSDictionary<NSString *, id> *)item;
+
+/// One dictionary per non-empty kind: kind, kindKey, kindFallback, count and
+/// entries. Never reads UIPasteboard and never calls the capture pipeline.
++ (NSArray<NSDictionary<NSString *, id> *> *)groupsForItems:(NSArray<NSDictionary<NSString *, id> *> *)items;
 
 @end
 
-/// A small popover laid over the panel. It owns its own dimming background and
-/// closes on a tap outside the card or on the Done button.
+/// A small popover laid over the panel. Its card uses the same
+/// UIBlurEffectStyleRegular material as KayokoMainView.
 @interface KayokoPasteboardSummaryView : UIView
 
 @property(nonatomic, copy, nullable) void (^dismissHandler)(void);
+@property(nonatomic, copy, nullable) void (^deleteHandler)(NSDictionary<NSString *, id> *item,
+                                                            KayokoSummaryDeleteCompletion completion);
 
-- (void)showInView:(UIView *)view animated:(BOOL)animated;
+- (void)showInView:(UIView *)view
+             items:(NSArray<NSDictionary<NSString *, id> *> *)items
+          animated:(BOOL)animated;
+- (void)reloadWithItems:(NSArray<NSDictionary<NSString *, id> *> *)items;
 - (void)dismissAnimated:(BOOL)animated;
 
 @end

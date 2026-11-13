@@ -5,16 +5,21 @@
 
 #import "KayokoPasteboardSummary.h"
 
+#import "KayokoPasteboardItem.h"
 #import "KayokoPasteboardManager.h"
 
-#import <ImageIO/ImageIO.h>
-#import <math.h>
+#import <objc/runtime.h>
 
-/// Long ASCII tag: proves this build really carries the summary view and gives
-/// field triage an accessibility identifier to look for.
+/// Kept as the 4.3.42 build-evidence tag; the card itself now shows a history
+/// breakdown rather than a snapshot of UIPasteboard.generalPasteboard.
 static NSString *const kKayokoSummaryBuildTag = @"KayokoPasteboardSummary-4.3.42";
+static NSString *const kKayokoSummaryBreakdownTag = @"KayokoHistoryBreakdown-4.3.43";
+static NSString *const kKayokoSummaryHistoryGateTag = @"KayokoSummaryHistoryOnly-4.3.43";
+static NSString *const kKayokoSummaryDeleteTag = @"KayokoSummaryDeleteRow-4.3.43";
 static NSString *const kKayokoSummaryHintFallback =
     @"Long press the grabber to inspect the current pasteboard (4.3.42). Tap outside to close.";
+static char kKayokoSummaryAssociatedItemKey = 0;
+static NSUInteger const kKayokoSummaryRowsPerGroup = 6;
 
 static NSString *KayokoSummaryLocalized(NSString *key, NSString *fallback) {
     return [[KayokoPasteboardManager localizationBundle] localizedStringForKey:key value:fallback table:@"Tweak"];
@@ -25,45 +30,14 @@ static NSString *KayokoSummaryByteString(unsigned long long byteCount) {
                                           countStyle:NSByteCountFormatterCountStyleFile];
 }
 
-/// ImageIO reads only the container header. Decoding a full-resolution photo on
-/// SpringBoard's main thread is exactly what this view must not do.
-static CGSize KayokoSummaryPixelSizeForData(NSData *data) {
-    if ([data length] == 0) {
-        return CGSizeZero;
-    }
-    CGImageSourceRef source = CGImageSourceCreateWithData((__bridge CFDataRef)data, NULL);
-    if (!source) {
-        return CGSizeZero;
-    }
-    NSDictionary<NSString *, id> *properties =
-        CFBridgingRelease(CGImageSourceCopyPropertiesAtIndex(source, 0, NULL));
-    CFRelease(source);
-
-    CGFloat width = [properties[(NSString *)kCGImagePropertyPixelWidth] doubleValue];
-    CGFloat height = [properties[(NSString *)kCGImagePropertyPixelHeight] doubleValue];
-    if (!isfinite(width) || !isfinite(height) || width <= 0 || height <= 0) {
-        return CGSizeZero;
-    }
-    return CGSizeMake(width, height);
-}
-
-/// Only ever used for text-like representations, and always bounded so a huge
-/// rich-text payload cannot allocate an unbounded NSString on the main thread.
-static NSString *KayokoSummaryTextFromValue(id value, NSUInteger limit) {
+/// Bounded so a long note or a pasted article cannot allocate an unbounded
+/// string on SpringBoard's main thread.
+static NSString *KayokoSummaryPreviewFromValue(id value) {
     NSString *text = nil;
     if ([value isKindOfClass:[NSString class]]) {
         text = value;
     } else if ([value isKindOfClass:[NSURL class]]) {
         text = [(NSURL *)value absoluteString];
-    } else if ([value isKindOfClass:[NSAttributedString class]]) {
-        text = [(NSAttributedString *)value string];
-    } else if ([value isKindOfClass:[NSData class]]) {
-        NSData *data = value;
-        NSUInteger length = MIN([data length], 8192);
-        if (length > 0) {
-            NSData *prefix = [data subdataWithRange:NSMakeRange(0, length)];
-            text = [[NSString alloc] initWithData:prefix encoding:NSUTF8StringEncoding];
-        }
     }
     if ([text length] == 0) {
         return @"";
@@ -71,175 +45,155 @@ static NSString *KayokoSummaryTextFromValue(id value, NSUInteger limit) {
     text = [[text stringByReplacingOccurrencesOfString:@"\n" withString:@" "]
         stringByReplacingOccurrencesOfString:@"\r"
                                   withString:@" "];
-    if ([text length] > limit) {
-        text = [[text substringToIndex:limit] stringByAppendingString:@"…"];
+    if ([text length] > 100) {
+        text = [[text substringToIndex:100] stringByAppendingString:@"..."];
     }
     return text;
 }
 
-static NSString *KayokoSummaryDetail(NSString *key, NSString *fallbackFormat, unsigned long first,
-                                    unsigned long second, NSString *trailing) {
-    NSString *format = KayokoSummaryLocalized(key, fallbackFormat);
-    if (trailing) {
-        return [NSString stringWithFormat:format, first, second, trailing];
+static NSString *KayokoSummaryKindKey(KayokoSummaryKind kind) {
+    switch (kind) {
+    case KayokoSummaryKindImage:
+        return @"Pasteboard Summary Kind Image";
+    case KayokoSummaryKindText:
+        return @"Pasteboard Summary Kind Text";
+    case KayokoSummaryKindLink:
+        return @"Pasteboard Summary Kind Link";
+    case KayokoSummaryKindRichText:
+        return @"Pasteboard Summary Kind Rich Text";
+    case KayokoSummaryKindOther:
+    default:
+        return @"Pasteboard Summary Kind Other";
     }
-    return [NSString stringWithFormat:format, first, second];
 }
 
-#pragma mark - Read-only snapshot
+static NSString *KayokoSummaryKindFallback(KayokoSummaryKind kind) {
+    switch (kind) {
+    case KayokoSummaryKindImage:
+        return @"Image";
+    case KayokoSummaryKindText:
+        return @"Text";
+    case KayokoSummaryKindLink:
+        return @"Link";
+    case KayokoSummaryKindRichText:
+        return @"Rich Text";
+    case KayokoSummaryKindOther:
+    default:
+        return @"Other";
+    }
+}
+
+/// Classification uses only the keys Kayoko itself writes into a history row.
+/// No UIPasteboard access, no image decoding, no disk I/O.
+static KayokoSummaryKind KayokoSummaryKindForItem(NSDictionary<NSString *, id> *item) {
+    NSString *imageName = item[kKayokoItemKeyImageName];
+    if ([imageName isKindOfClass:[NSString class]] && [imageName length] > 0) {
+        return KayokoSummaryKindImage;
+    }
+
+    NSString *richUTI = item[kKayokoItemKeyRichTextUTI];
+    NSString *richName = item[kKayokoItemKeyRichTextName];
+    if (([richUTI isKindOfClass:[NSString class]] && [richUTI length] > 0) ||
+        ([richName isKindOfClass:[NSString class]] && [richName length] > 0)) {
+        return KayokoSummaryKindRichText;
+    }
+
+    if ([item[kKayokoItemKeyHasLink] boolValue]) {
+        return KayokoSummaryKindLink;
+    }
+
+    NSString *content = item[kKayokoItemKeyContent];
+    if ([content isKindOfClass:[NSString class]] && [content length] > 0) {
+        return KayokoSummaryKindText;
+    }
+    return KayokoSummaryKindOther;
+}
+
+static NSString *KayokoSummaryDetailForItem(NSDictionary<NSString *, id> *item, KayokoSummaryKind kind) {
+    if (kind == KayokoSummaryKindImage) {
+        NSUInteger width = [item[kKayokoItemKeyImagePixelWidth] unsignedIntegerValue];
+        NSUInteger height = [item[kKayokoItemKeyImagePixelHeight] unsignedIntegerValue];
+        unsigned long long bytes = [item[kKayokoItemKeyImageByteCount] unsignedLongLongValue];
+        if (width > 0 && height > 0) {
+            NSString *format = KayokoSummaryLocalized(@"Pasteboard Summary Pixels", @"%lu x %lu px | %@");
+            return [NSString stringWithFormat:format, (unsigned long)width, (unsigned long)height,
+                                              KayokoSummaryByteString(bytes)];
+        }
+        return KayokoSummaryByteString(bytes);
+    }
+
+    if (kind == KayokoSummaryKindRichText) {
+        NSString *name = item[kKayokoItemKeyRichTextName];
+        if ([name isKindOfClass:[NSString class]] && [name length] > 0) {
+            return name;
+        }
+        NSString *uti = item[kKayokoItemKeyRichTextUTI];
+        return [uti isKindOfClass:[NSString class]] ? uti : @"";
+    }
+
+    NSString *content = item[kKayokoItemKeyContent];
+    NSUInteger characters = [content isKindOfClass:[NSString class]] ? [content length] : 0;
+    NSString *format = KayokoSummaryLocalized(@"Pasteboard Summary Characters", @"%lu characters");
+    return [NSString stringWithFormat:format, (unsigned long)characters];
+}
+
+static NSString *KayokoSummaryPreviewForItem(NSDictionary<NSString *, id> *item, KayokoSummaryKind kind) {
+    if (kind == KayokoSummaryKindImage) {
+        NSString *name = item[kKayokoItemKeyImageName];
+        return [name isKindOfClass:[NSString class]] ? KayokoSummaryPreviewFromValue(name) : @"";
+    }
+    return KayokoSummaryPreviewFromValue(item[kKayokoItemKeyContent]);
+}
+
+#pragma mark - History breakdown
 
 @implementation KayokoPasteboardSummary
 
-+ (NSArray<NSDictionary<NSString *, id> *> *)entries {
-    NSArray *items = [[UIPasteboard generalPasteboard] items];
-    if (![items isKindOfClass:[NSArray class]]) {
-        return @[];
++ (NSDictionary<NSString *, id> *)entryForItem:(NSDictionary<NSString *, id> *)item {
+    KayokoSummaryKind kind = KayokoSummaryKindForItem(item);
+    return @{
+        @"item" : item,
+        @"kind" : @(kind),
+        @"detail" : KayokoSummaryDetailForItem(item, kind),
+        @"preview" : KayokoSummaryPreviewForItem(item, kind)
+    };
+}
+
++ (NSArray<NSDictionary<NSString *, id> *> *)groupsForItems:(NSArray<NSDictionary<NSString *, id> *> *)items {
+    NSMutableArray<NSMutableArray<NSDictionary<NSString *, id> *> *> *buckets =
+        [[NSMutableArray alloc] initWithCapacity:KayokoSummaryKindCount];
+    for (NSUInteger kind = 0; kind < KayokoSummaryKindCount; kind++) {
+        [buckets addObject:[[NSMutableArray alloc] init]];
     }
 
-    NSArray<NSString *> *imageTypes = @[
-        @"public.png", @"public.jpeg", @"public.jpeg-2000", @"public.tiff", @"public.image",
-        @"com.apple.uikit.image", @"public.heic", @"public.heif", @"public.webp", @"com.compuserve.gif"
-    ];
-    NSArray<NSString *> *linkTypes = @[ @"public.url", @"public.file-url" ];
-    NSArray<NSString *> *richTypes = @[
-        @"public.html", @"public.rtf", @"public.rtfd", @"com.apple.flat-rtfd", @"com.apple.rtfd",
-        @"com.apple.WebKit.archived-content"
-    ];
-    NSArray<NSString *> *textTypes = @[ @"public.utf8-plain-text", @"public.plain-text", @"public.text" ];
+    for (id candidate in items ?: @[]) {
+        if (![candidate isKindOfClass:[NSDictionary class]]) {
+            continue;
+        }
+        NSDictionary<NSString *, id> *item = candidate;
+        NSDictionary<NSString *, id> *entry = [self entryForItem:item];
+        NSUInteger kind = [entry[@"kind"] unsignedIntegerValue];
+        if (kind < KayokoSummaryKindCount) {
+            [buckets[kind] addObject:entry];
+        }
+    }
 
-    NSMutableArray<NSDictionary<NSString *, id> *> *result =
-        [[NSMutableArray alloc] initWithCapacity:[items count]];
-
-    [items enumerateObjectsUsingBlock:^(id rawItem, NSUInteger index, __unused BOOL *stop) {
-      if (![rawItem isKindOfClass:[NSDictionary class]]) {
-          [result addObject:@{
-              @"index" : @(index + 1),
-              @"kindKey" : @"Pasteboard Summary Kind Other",
-              @"kindFallback" : @"Other",
-              @"detail" : @"",
-              @"preview" : @"",
-              @"typeCount" : @0
-          }];
-          return;
-      }
-
-      NSDictionary<NSString *, id> *item = rawItem;
-      NSString *kindKey = @"Pasteboard Summary Kind Other";
-      NSString *kindFallback = @"Other";
-      NSString *detail = @"";
-      NSString *preview = @"";
-
-      NSData *imageData = nil;
-      NSString *imageType = nil;
-      UIImage *directImage = nil;
-      for (NSString *type in imageTypes) {
-          id value = item[type];
-          if ([value isKindOfClass:[NSData class]]) {
-              imageData = value;
-              imageType = type;
-              break;
-          }
-          if ([value isKindOfClass:[UIImage class]]) {
-              directImage = value;
-              imageType = type;
-              break;
-          }
-      }
-
-      if (imageData || directImage) {
-          kindKey = @"Pasteboard Summary Kind Image";
-          kindFallback = @"Image";
-          preview = imageType ?: @"";
-          if (imageData) {
-              CGSize pixels = KayokoSummaryPixelSizeForData(imageData);
-              unsigned long long bytes = [imageData length];
-              if (pixels.width > 0 && pixels.height > 0) {
-                  detail = KayokoSummaryDetail(@"Pasteboard Summary Pixels", @"%lu x %lu px · %@",
-                                               (unsigned long)pixels.width, (unsigned long)pixels.height,
-                                               KayokoSummaryByteString(bytes));
-              } else {
-                  detail = KayokoSummaryByteString(bytes);
-              }
-          } else {
-              CGSize size = [directImage size];
-              detail = KayokoSummaryDetail(@"Pasteboard Summary Points", @"%lu x %lu pt · in memory",
-                                           (unsigned long)size.width, (unsigned long)size.height, nil);
-          }
-      } else {
-          NSString *linkType = nil;
-          for (NSString *type in linkTypes) {
-              if (item[type]) {
-                  linkType = type;
-                  break;
-              }
-          }
-          NSString *richType = nil;
-          for (NSString *type in richTypes) {
-              if (item[type]) {
-                  richType = type;
-                  break;
-              }
-          }
-          NSString *textType = nil;
-          for (NSString *type in textTypes) {
-              if (item[type]) {
-                  textType = type;
-                  break;
-              }
-          }
-
-          if (linkType) {
-              kindKey = @"Pasteboard Summary Kind Link";
-              kindFallback = @"Link";
-              NSString *text = KayokoSummaryTextFromValue(item[linkType], 100);
-              preview = text;
-              detail = KayokoSummaryDetail(@"Pasteboard Summary Characters", @"%lu characters",
-                                           (unsigned long)[text length], 0, nil);
-          } else if (richType) {
-              kindKey = @"Pasteboard Summary Kind Rich Text";
-              kindFallback = @"Rich Text";
-              preview = richType;
-              id value = item[richType];
-              unsigned long long bytes = [value isKindOfClass:[NSData class]] ? [value length] : 0;
-              detail = bytes > 0 ? KayokoSummaryByteString(bytes) : richType;
-              NSString *plainText = textType ? KayokoSummaryTextFromValue(item[textType], 60) : @"";
-              if ([plainText length] > 0) {
-                  preview = plainText;
-              }
-          } else if (textType) {
-              kindKey = @"Pasteboard Summary Kind Text";
-              kindFallback = @"Text";
-              NSString *text = KayokoSummaryTextFromValue(item[textType], 100);
-              preview = text;
-              detail = KayokoSummaryDetail(@"Pasteboard Summary Characters", @"%lu characters",
-                                           (unsigned long)[text length], 0, nil);
-          } else {
-              NSArray<NSString *> *types = [[item allKeys] sortedArrayUsingSelector:@selector(compare:)];
-              NSUInteger shown = MIN([types count], 2);
-              preview = [[types subarrayWithRange:NSMakeRange(0, shown)] componentsJoinedByString:@", "];
-              detail = @"";
-          }
-      }
-
-      NSString *formats = KayokoSummaryDetail(@"Pasteboard Summary Formats", @"%lu formats",
-                                              (unsigned long)[item count], 0, nil);
-      if ([detail length] > 0) {
-          detail = [NSString stringWithFormat:@"%@ · %@", detail, formats];
-      } else {
-          detail = formats;
-      }
-
-      [result addObject:@{
-          @"index" : @(index + 1),
-          @"kindKey" : kindKey,
-          @"kindFallback" : kindFallback,
-          @"detail" : detail,
-          @"preview" : preview,
-          @"typeCount" : @([item count])
-      }];
-    }];
-
-    return result;
+    NSMutableArray<NSDictionary<NSString *, id> *> *groups =
+        [[NSMutableArray alloc] initWithCapacity:KayokoSummaryKindCount];
+    for (NSUInteger kind = 0; kind < KayokoSummaryKindCount; kind++) {
+        NSArray<NSDictionary<NSString *, id> *> *entries = buckets[kind];
+        if ([entries count] == 0) {
+            continue;
+        }
+        [groups addObject:@{
+            @"kind" : @(kind),
+            @"kindKey" : KayokoSummaryKindKey((KayokoSummaryKind)kind),
+            @"kindFallback" : KayokoSummaryKindFallback((KayokoSummaryKind)kind),
+            @"count" : @([entries count]),
+            @"entries" : entries
+        }];
+    }
+    return groups;
 }
 
 @end
@@ -248,8 +202,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface KayokoPasteboardSummaryView ()
 @property(nonatomic, strong) UIView *cardView;
+@property(nonatomic, strong) UIVisualEffectView *materialView;
 @property(nonatomic, strong) UILabel *countLabel;
-@property(nonatomic, strong) UIStackView *rowsStackView;
+@property(nonatomic, strong) UILabel *breakdownLabel;
+@property(nonatomic, strong) UIStackView *groupsStackView;
 @property(nonatomic, assign) BOOL isDismissing;
 @end
 
@@ -276,9 +232,12 @@ NS_ASSUME_NONNULL_END
 }
 
 - (void)buildCard {
+    // The panel itself is a UIBlurEffectStyleRegular material view. The card
+    // uses the very same style; a transparent shadow host keeps the shadow
+    // outside the clipped, rounded glass layer.
     UIView *card = [[UIView alloc] init];
-    [card setBackgroundColor:[UIColor secondarySystemGroupedBackgroundColor]];
-    [[card layer] setCornerRadius:16];
+    [card setBackgroundColor:[UIColor clearColor]];
+    [card setAccessibilityIdentifier:kKayokoSummaryHistoryGateTag];
     [[card layer] setShadowColor:[[UIColor blackColor] CGColor]];
     [[card layer] setShadowOpacity:0.18];
     [[card layer] setShadowRadius:20];
@@ -298,17 +257,31 @@ NS_ASSUME_NONNULL_END
         [[card heightAnchor] constraintLessThanOrEqualToAnchor:[self heightAnchor] constant:-40]
     ]];
 
+    UIVisualEffectView *glass =
+        [[UIVisualEffectView alloc] initWithEffect:[UIBlurEffect effectWithStyle:UIBlurEffectStyleRegular]];
+    [glass setClipsToBounds:YES];
+    [[glass layer] setCornerRadius:16];
+    [card addSubview:glass];
+    [self setMaterialView:glass];
+    [glass setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [NSLayoutConstraint activateConstraints:@[
+        [[glass topAnchor] constraintEqualToAnchor:[card topAnchor]],
+        [[glass leadingAnchor] constraintEqualToAnchor:[card leadingAnchor]],
+        [[glass trailingAnchor] constraintEqualToAnchor:[card trailingAnchor]],
+        [[glass bottomAnchor] constraintEqualToAnchor:[card bottomAnchor]]
+    ]];
+
     UIStackView *root = [[UIStackView alloc] init];
     [root setAxis:UILayoutConstraintAxisVertical];
     [root setAlignment:UIStackViewAlignmentFill];
-    [root setSpacing:14];
-    [card addSubview:root];
+    [root setSpacing:12];
+    [[glass contentView] addSubview:root];
     [root setTranslatesAutoresizingMaskIntoConstraints:NO];
     [NSLayoutConstraint activateConstraints:@[
-        [[root topAnchor] constraintEqualToAnchor:[card topAnchor] constant:18],
-        [[root leadingAnchor] constraintEqualToAnchor:[card leadingAnchor] constant:18],
-        [[root trailingAnchor] constraintEqualToAnchor:[card trailingAnchor] constant:-18],
-        [[root bottomAnchor] constraintEqualToAnchor:[card bottomAnchor] constant:-18]
+        [[root topAnchor] constraintEqualToAnchor:[[glass contentView] topAnchor] constant:18],
+        [[root leadingAnchor] constraintEqualToAnchor:[[glass contentView] leadingAnchor] constant:18],
+        [[root trailingAnchor] constraintEqualToAnchor:[[glass contentView] trailingAnchor] constant:-18],
+        [[root bottomAnchor] constraintEqualToAnchor:[[glass contentView] bottomAnchor] constant:-18]
     ]];
 
     UIStackView *header = [[UIStackView alloc] init];
@@ -318,7 +291,7 @@ NS_ASSUME_NONNULL_END
     [root addArrangedSubview:header];
 
     UILabel *titleLabel = [[UILabel alloc] init];
-    [titleLabel setText:KayokoSummaryLocalized(@"Pasteboard Summary", @"Clipboard")];
+    [titleLabel setText:KayokoSummaryLocalized(@"Pasteboard Summary", @"History Breakdown")];
     [titleLabel setFont:[UIFont systemFontOfSize:17 weight:UIFontWeightSemibold]];
     [titleLabel setTextColor:[UIColor labelColor]];
     [header addArrangedSubview:titleLabel];
@@ -334,12 +307,46 @@ NS_ASSUME_NONNULL_END
     [header addArrangedSubview:countLabel];
     [self setCountLabel:countLabel];
 
-    UIStackView *rows = [[UIStackView alloc] init];
-    [rows setAxis:UILayoutConstraintAxisVertical];
-    [rows setAlignment:UIStackViewAlignmentFill];
-    [rows setSpacing:12];
-    [root addArrangedSubview:rows];
-    [self setRowsStackView:rows];
+    UILabel *breakdownLabel = [[UILabel alloc] init];
+    [breakdownLabel setAccessibilityIdentifier:kKayokoSummaryBreakdownTag];
+    [breakdownLabel setFont:[UIFont systemFontOfSize:12 weight:UIFontWeightMedium]];
+    [breakdownLabel setTextColor:[UIColor secondaryLabelColor]];
+    [breakdownLabel setNumberOfLines:2];
+    [root addArrangedSubview:breakdownLabel];
+    [self setBreakdownLabel:breakdownLabel];
+
+    UIScrollView *scrollView = [[UIScrollView alloc] init];
+    [scrollView setShowsVerticalScrollIndicator:YES];
+    [scrollView setAlwaysBounceVertical:NO];
+    [root addArrangedSubview:scrollView];
+    [scrollView setTranslatesAutoresizingMaskIntoConstraints:NO];
+    // A UIScrollView has no intrinsic height, so without an explicit preferred
+    // height the stack would collapse it to zero. The preferred/minimum values
+    // stay below required priority so a short panel can still shrink the card.
+    NSLayoutConstraint *preferredScrollHeight = [[scrollView heightAnchor] constraintEqualToConstant:200];
+    [preferredScrollHeight setPriority:UILayoutPriorityDefaultLow];
+    NSLayoutConstraint *minimumScrollHeight =
+        [[scrollView heightAnchor] constraintGreaterThanOrEqualToConstant:60];
+    [minimumScrollHeight setPriority:UILayoutPriorityDefaultHigh];
+    [NSLayoutConstraint activateConstraints:@[
+        [[scrollView heightAnchor] constraintLessThanOrEqualToConstant:260],
+        preferredScrollHeight, minimumScrollHeight
+    ]];
+
+    UIStackView *groupsStack = [[UIStackView alloc] init];
+    [groupsStack setAxis:UILayoutConstraintAxisVertical];
+    [groupsStack setAlignment:UIStackViewAlignmentFill];
+    [groupsStack setSpacing:12];
+    [scrollView addSubview:groupsStack];
+    [self setGroupsStackView:groupsStack];
+    [groupsStack setTranslatesAutoresizingMaskIntoConstraints:NO];
+    [NSLayoutConstraint activateConstraints:@[
+        [[groupsStack topAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide] topAnchor],
+        [[groupsStack leadingAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide] leadingAnchor],
+        [[groupsStack trailingAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide] trailingAnchor],
+        [[groupsStack bottomAnchor] constraintEqualToAnchor:[scrollView contentLayoutGuide] bottomAnchor],
+        [[groupsStack widthAnchor] constraintEqualToAnchor:[scrollView frameLayoutGuide] widthAnchor]
+    ]];
 
     UILabel *hintLabel = [[UILabel alloc] init];
     [hintLabel setText:KayokoSummaryLocalized(@"Pasteboard Summary Hint", kKayokoSummaryHintFallback)];
@@ -363,53 +370,91 @@ NS_ASSUME_NONNULL_END
 
 #pragma mark - Content
 
-- (void)reloadRows {
-    for (UIView *arranged in [[self rowsStackView] arrangedSubviews]) {
+- (void)reloadWithItems:(NSArray<NSDictionary<NSString *, id> *> *)items {
+    for (UIView *arranged in [[self groupsStackView] arrangedSubviews]) {
         [arranged removeFromSuperview];
     }
 
-    NSArray<NSDictionary<NSString *, id> *> *entries = [KayokoPasteboardSummary entries];
-    NSUInteger count = [entries count];
+    NSArray<NSDictionary<NSString *, id> *> *safeItems = items ?: @[];
+    NSUInteger total = 0;
+    for (id candidate in safeItems) {
+        if ([candidate isKindOfClass:[NSDictionary class]]) {
+            total++;
+        }
+    }
     NSString *countFormat = KayokoSummaryLocalized(@"Pasteboard Summary Count", @"%lu items");
-    [[self countLabel] setText:[NSString stringWithFormat:countFormat, (unsigned long)count]];
+    [[self countLabel] setText:[NSString stringWithFormat:countFormat, (unsigned long)total]];
 
-    if (count == 0) {
+    NSArray<NSDictionary<NSString *, id> *> *groups = [KayokoPasteboardSummary groupsForItems:safeItems];
+    NSMutableArray<NSString *> *chips = [[NSMutableArray alloc] initWithCapacity:[groups count]];
+    for (NSDictionary<NSString *, id> *group in groups) {
+        NSString *name = KayokoSummaryLocalized(group[@"kindKey"], group[@"kindFallback"]);
+        NSString *chipFormat = KayokoSummaryLocalized(@"Pasteboard Summary Chip", @"%@ x %lu");
+        [chips addObject:[NSString stringWithFormat:chipFormat, name,
+                                                    (unsigned long)[group[@"count"] unsignedIntegerValue]]];
+    }
+    [[self breakdownLabel] setText:[chips componentsJoinedByString:@"  |  "]];
+
+    if ([groups count] == 0) {
         UILabel *emptyLabel = [[UILabel alloc] init];
-        [emptyLabel setText:KayokoSummaryLocalized(@"Pasteboard Summary Empty", @"The clipboard is empty.")];
+        [emptyLabel setText:KayokoSummaryLocalized(@"Pasteboard Summary Empty", @"History is empty.")];
         [emptyLabel setFont:[UIFont systemFontOfSize:13]];
         [emptyLabel setTextColor:[UIColor secondaryLabelColor]];
         [emptyLabel setNumberOfLines:0];
-        [[self rowsStackView] addArrangedSubview:emptyLabel];
+        [[self groupsStackView] addArrangedSubview:emptyLabel];
         return;
     }
 
-    NSUInteger const visibleLimit = 8;
-    NSUInteger visible = MIN(count, visibleLimit);
-    for (NSUInteger index = 0; index < visible; index++) {
-        [[self rowsStackView] addArrangedSubview:[self rowForEntry:entries[index]]];
+    for (NSDictionary<NSString *, id> *group in groups) {
+        [[self groupsStackView] addArrangedSubview:[self headerForGroup:group]];
+
+        NSArray<NSDictionary<NSString *, id> *> *entries = group[@"entries"];
+        NSUInteger visible = MIN([entries count], kKayokoSummaryRowsPerGroup);
+        for (NSUInteger index = 0; index < visible; index++) {
+            [[self groupsStackView] addArrangedSubview:[self rowForEntry:entries[index]]];
+        }
+        if ([entries count] > visible) {
+            NSString *moreFormat = KayokoSummaryLocalized(@"Pasteboard Summary More", @"+ %lu more");
+            UILabel *moreLabel = [[UILabel alloc] init];
+            [moreLabel setText:[NSString stringWithFormat:moreFormat,
+                                                         (unsigned long)([entries count] - visible)]];
+            [moreLabel setFont:[UIFont systemFontOfSize:12]];
+            [moreLabel setTextColor:[UIColor tertiaryLabelColor]];
+            [[self groupsStackView] addArrangedSubview:moreLabel];
+        }
     }
-    if (count > visible) {
-        NSString *moreFormat = KayokoSummaryLocalized(@"Pasteboard Summary More", @"+ %lu more");
-        UILabel *moreLabel = [[UILabel alloc] init];
-        [moreLabel setText:[NSString stringWithFormat:moreFormat, (unsigned long)(count - visible)]];
-        [moreLabel setFont:[UIFont systemFontOfSize:12]];
-        [moreLabel setTextColor:[UIColor tertiaryLabelColor]];
-        [[self rowsStackView] addArrangedSubview:moreLabel];
-    }
+}
+
+- (UIView *)headerForGroup:(NSDictionary<NSString *, id> *)group {
+    UIStackView *header = [[UIStackView alloc] init];
+    [header setAxis:UILayoutConstraintAxisHorizontal];
+    [header setAlignment:UIStackViewAlignmentCenter];
+    [header setSpacing:8];
+
+    UILabel *kindLabel = [[UILabel alloc] init];
+    [kindLabel setText:KayokoSummaryLocalized(group[@"kindKey"], group[@"kindFallback"])];
+    [kindLabel setFont:[UIFont systemFontOfSize:14 weight:UIFontWeightSemibold]];
+    [kindLabel setTextColor:[UIColor labelColor]];
+    [header addArrangedSubview:kindLabel];
+
+    UIView *flex = [[UIView alloc] init];
+    [flex setContentHuggingPriority:1 forAxis:UILayoutConstraintAxisHorizontal];
+    [header addArrangedSubview:flex];
+
+    UILabel *badge = [[UILabel alloc] init];
+    [badge setText:[NSString stringWithFormat:@"%lu", (unsigned long)[group[@"count"] unsignedIntegerValue]]];
+    [badge setFont:[UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightSemibold]];
+    [badge setTextColor:[UIColor secondaryLabelColor]];
+    [header addArrangedSubview:badge];
+
+    return header;
 }
 
 - (UIView *)rowForEntry:(NSDictionary<NSString *, id> *)entry {
     UIStackView *row = [[UIStackView alloc] init];
     [row setAxis:UILayoutConstraintAxisHorizontal];
-    [row setAlignment:UIStackViewAlignmentTop];
-    [row setSpacing:10];
-
-    UILabel *indexLabel = [[UILabel alloc] init];
-    [indexLabel setText:[NSString stringWithFormat:@"#%@", entry[@"index"]]];
-    [indexLabel setFont:[UIFont monospacedDigitSystemFontOfSize:12 weight:UIFontWeightMedium]];
-    [indexLabel setTextColor:[UIColor tertiaryLabelColor]];
-    [row addArrangedSubview:indexLabel];
-    [NSLayoutConstraint activateConstraints:@[ [[indexLabel widthAnchor] constraintEqualToConstant:26] ]];
+    [row setAlignment:UIStackViewAlignmentCenter];
+    [row setSpacing:8];
 
     UIStackView *texts = [[UIStackView alloc] init];
     [texts setAxis:UILayoutConstraintAxisVertical];
@@ -417,42 +462,55 @@ NS_ASSUME_NONNULL_END
     [texts setSpacing:2];
     [row addArrangedSubview:texts];
 
-    UILabel *kindLabel = [[UILabel alloc] init];
-    [kindLabel setText:KayokoSummaryLocalized(entry[@"kindKey"], entry[@"kindFallback"])];
-    [kindLabel setFont:[UIFont systemFontOfSize:14 weight:UIFontWeightSemibold]];
-    [kindLabel setTextColor:[UIColor labelColor]];
-    [texts addArrangedSubview:kindLabel];
+    NSString *preview = entry[@"preview"];
+    UILabel *previewLabel = [[UILabel alloc] init];
+    [previewLabel setText:[preview length] > 0
+                              ? preview
+                              : KayokoSummaryLocalized(@"Pasteboard Summary Untitled", @"(no preview)")];
+    [previewLabel setFont:[UIFont systemFontOfSize:12]];
+    [previewLabel setTextColor:[UIColor labelColor]];
+    [previewLabel setNumberOfLines:2];
+    [texts addArrangedSubview:previewLabel];
 
     NSString *detail = entry[@"detail"];
     if ([detail length] > 0) {
         UILabel *detailLabel = [[UILabel alloc] init];
         [detailLabel setText:detail];
-        [detailLabel setFont:[UIFont systemFontOfSize:12]];
+        [detailLabel setFont:[UIFont systemFontOfSize:11]];
         [detailLabel setTextColor:[UIColor secondaryLabelColor]];
-        [detailLabel setNumberOfLines:0];
+        [detailLabel setNumberOfLines:1];
         [texts addArrangedSubview:detailLabel];
     }
 
-    NSString *preview = entry[@"preview"];
-    if ([preview length] > 0) {
-        UILabel *previewLabel = [[UILabel alloc] init];
-        [previewLabel setText:preview];
-        [previewLabel setFont:[UIFont systemFontOfSize:12]];
-        [previewLabel setTextColor:[UIColor tertiaryLabelColor]];
-        [previewLabel setNumberOfLines:2];
-        [texts addArrangedSubview:previewLabel];
-    }
+    UIButton *deleteButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [deleteButton setImage:[UIImage systemImageNamed:@"trash.fill"] forState:UIControlStateNormal];
+    [deleteButton setTintColor:[UIColor systemRedColor]];
+    [deleteButton setAccessibilityIdentifier:kKayokoSummaryDeleteTag];
+    [deleteButton setAccessibilityLabel:KayokoSummaryLocalized(@"Pasteboard Summary Delete", @"Delete")];
+    objc_setAssociatedObject(deleteButton, &kKayokoSummaryAssociatedItemKey, entry[@"item"],
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    [deleteButton addTarget:self
+                     action:@selector(handleDeleteButton:)
+           forControlEvents:UIControlEventTouchUpInside];
+    [row addArrangedSubview:deleteButton];
+    [NSLayoutConstraint activateConstraints:@[
+        [[deleteButton widthAnchor] constraintEqualToConstant:34],
+        [[deleteButton heightAnchor] constraintEqualToConstant:34]
+    ]];
 
     return row;
 }
 
 #pragma mark - Presentation
 
-- (void)showInView:(UIView *)view animated:(BOOL)animated {
+- (void)showInView:(UIView *)view
+             items:(NSArray<NSDictionary<NSString *, id> *> *)items
+          animated:(BOOL)animated {
+    [self setOverrideUserInterfaceStyle:[view overrideUserInterfaceStyle]];
     [self setFrame:[view bounds]];
     [self setAutoresizingMask:UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight];
     [view addSubview:self];
-    [self reloadRows];
+    [self reloadWithItems:items];
 
     if (!animated) {
         return;
@@ -496,6 +554,27 @@ NS_ASSUME_NONNULL_END
 }
 
 #pragma mark - Actions
+
+- (void)handleDeleteButton:(UIButton *)button {
+    NSDictionary<NSString *, id> *item = objc_getAssociatedObject(button, &kKayokoSummaryAssociatedItemKey);
+    void (^handler)(NSDictionary<NSString *, id> *, KayokoSummaryDeleteCompletion) = [self deleteHandler];
+    if (![item isKindOfClass:[NSDictionary class]] || !handler) {
+        return;
+    }
+
+    [button setEnabled:NO];
+    __weak typeof(self) weakSelf = self;
+    handler(item, ^(BOOL success, NSArray<NSDictionary<NSString *, id> *> *freshItems) {
+      __strong typeof(weakSelf) strongSelf = weakSelf;
+      if (!strongSelf) {
+          return;
+      }
+      [button setEnabled:YES];
+      if (success) {
+          [strongSelf reloadWithItems:freshItems ?: @[]];
+      }
+    });
+}
 
 - (void)handleBackdropTap:(UITapGestureRecognizer *)recognizer {
     if (CGRectContainsPoint([[self cardView] frame], [recognizer locationInView:self])) {

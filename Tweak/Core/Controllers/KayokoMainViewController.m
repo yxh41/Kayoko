@@ -574,19 +574,40 @@ NS_ASSUME_NONNULL_END
 #pragma mark - Pasteboard Summary
 
 - (void)panelPresentationControllerDidLongPressGrabberArea:(KayokoPanelPresentationController *)controller {
+    (void)controller;
     if ([self isHidden] || [self pasteboardSummaryView]) {
         return;
     }
 
-    // Deliberately does not go through KayokoPasteboardManager's pull path:
-    // that one advances changeCount, writes images to disk, inserts history
-    // rows and applies the blacklist. A peek must not change any of that.
+    // 4.3.43: the breakdown and its delete buttons only ever describe the
+    // history list. On Favorites - or while a clear confirmation is up - a long
+    // press is a no-op, so a favorite can never be deleted from this popover.
+    if (![[self effectiveActiveHistoryKey] isEqualToString:kKayokoHistoryKeyHistory]) {
+        return;
+    }
+
+    NSArray<NSDictionary<NSString *, id> *> *items = [[self activeListViewController] items] ?: @[];
     KayokoPasteboardSummaryView *summaryView = [[KayokoPasteboardSummaryView alloc] init];
     __weak typeof(self) weakSelf = self;
     [summaryView setDismissHandler:^{
       [weakSelf dismissPasteboardSummaryAnimated:YES];
     }];
-    [summaryView showInView:[self mainView] animated:YES];
+    [summaryView setDeleteHandler:^(NSDictionary<NSString *, id> *item,
+                                    KayokoSummaryDeleteCompletion completion) {
+      __strong typeof(weakSelf) strongSelf = weakSelf;
+      if (!strongSelf ||
+          ![[strongSelf effectiveActiveHistoryKey] isEqualToString:kKayokoHistoryKeyHistory]) {
+          completion(NO, @[]);
+          return;
+      }
+      [[strongSelf activeListViewController] removeItemDictionary:item
+                                                      completion:^(BOOL removed) {
+                                                        NSArray<NSDictionary<NSString *, id> *> *fresh =
+                                                            [[strongSelf activeListViewController] items] ?: @[];
+                                                        completion(removed, fresh);
+                                                      }];
+    }];
+    [summaryView showInView:[self mainView] items:items animated:YES];
     [self setPasteboardSummaryView:summaryView];
     [[self panelPresentationController] triggerHapticFeedbackWithStyle:UIImpactFeedbackStyleMedium];
 }
