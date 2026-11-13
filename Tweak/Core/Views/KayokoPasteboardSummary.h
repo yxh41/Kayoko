@@ -2,7 +2,7 @@
 //  KayokoPasteboardSummary.h
 //  Kayoko
 //
-//  A grouped breakdown of Kayoko's own history rows, with per-row deletion.
+//  A grouped breakdown of Kayoko's own history rows, with per-category deletion.
 //
 
 #import <UIKit/UIKit.h>
@@ -40,7 +40,10 @@ typedef void (^KayokoSummaryDeleteCompletion)(BOOL success,
 @interface KayokoPasteboardSummaryView : UIView
 
 @property(nonatomic, copy, nullable) void (^dismissHandler)(void);
-@property(nonatomic, copy, nullable) void (^deleteHandler)(NSDictionary<NSString *, id> *item,
+/// Deletes an entire category at once: the caller passes every original history
+/// dictionary grouped under one kind, the owner removes them and returns the
+/// post-deletion item list so the popover can rebuild itself.
+@property(nonatomic, copy, nullable) void (^deleteHandler)(NSArray<NSDictionary<NSString *, id> *> *items,
                                                             KayokoSummaryDeleteCompletion completion);
 
 - (void)showInView:(UIView *)view

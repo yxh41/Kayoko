@@ -592,7 +592,7 @@ NS_ASSUME_NONNULL_END
     [summaryView setDismissHandler:^{
       [weakSelf dismissPasteboardSummaryAnimated:YES];
     }];
-    [summaryView setDeleteHandler:^(NSDictionary<NSString *, id> *item,
+    [summaryView setDeleteHandler:^(NSArray<NSDictionary<NSString *, id> *> *items,
                                     KayokoSummaryDeleteCompletion completion) {
       __strong typeof(weakSelf) strongSelf = weakSelf;
       if (!strongSelf ||
@@ -600,12 +600,27 @@ NS_ASSUME_NONNULL_END
           completion(NO, @[]);
           return;
       }
-      [[strongSelf activeListViewController] removeItemDictionary:item
-                                                      completion:^(BOOL removed) {
-                                                        NSArray<NSDictionary<NSString *, id> *> *fresh =
-                                                            [[strongSelf activeListViewController] items] ?: @[];
-                                                        completion(removed, fresh);
-                                                      }];
+      NSArray<NSDictionary<NSString *, id> *> *safeItems = items ?: @[];
+      NSUInteger remaining = [safeItems count];
+      if (remaining == 0) {
+          completion(YES, [[strongSelf activeListViewController] items] ?: @[]);
+          return;
+      }
+      // 4.3.46: a category delete fans out to one removeItemDictionary: per
+      // entry. The final completion reports the freshly read list, which is the
+      // authoritative post-deletion state regardless of any duplicate content.
+      for (NSDictionary<NSString *, id> *item in safeItems) {
+          [[strongSelf activeListViewController] removeItemDictionary:item
+                                                          completion:^(BOOL removed) {
+                                                            (void)removed;
+                                                            remaining--;
+                                                            if (remaining == 0) {
+                                                                NSArray<NSDictionary<NSString *, id> *> *fresh =
+                                                                    [[strongSelf activeListViewController] items] ?: @[];
+                                                                completion(YES, fresh);
+                                                            }
+                                                          }];
+      }
     }];
     [summaryView showInView:[self mainView] items:items animated:YES];
     [self setPasteboardSummaryView:summaryView];

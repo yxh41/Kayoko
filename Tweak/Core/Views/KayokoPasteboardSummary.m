@@ -15,14 +15,15 @@
 static NSString *const kKayokoSummaryBuildTag = @"KayokoPasteboardSummary-4.3.42";
 static NSString *const kKayokoSummaryBreakdownTag = @"KayokoHistoryBreakdown-4.3.43";
 static NSString *const kKayokoSummaryHistoryGateTag = @"KayokoSummaryHistoryOnly-4.3.43";
-static NSString *const kKayokoSummaryDeleteTag = @"KayokoSummaryDeleteRow-4.3.43";
 /// 4.3.44: the delete buttons now call the public completion-bearing removal
-/// API, so the popover refreshes from the exact post-animation item list.
+/// API, so the popover refreshes from the exact post-deletion item list.
 static NSString *const kKayokoSummaryDeleteAPITag = @"KayokoSummaryDeletePublicAPI-4.3.44";
+/// 4.3.46: the per-row trash buttons are gone. Each category header carries a
+/// single trash button that removes the whole group at once.
+static NSString *const kKayokoSummaryCategoryDeleteTag = @"KayokoSummaryDeleteCategory-4.3.46";
 static NSString *const kKayokoSummaryHintFallback =
     @"Long press the grabber to inspect the current pasteboard (4.3.42). Tap outside to close.";
-static char kKayokoSummaryAssociatedItemKey = 0;
-static NSUInteger const kKayokoSummaryRowsPerGroup = 6;
+static char kKayokoSummaryAssociatedEntriesKey = 0;
 
 static NSString *KayokoSummaryLocalized(NSString *key, NSString *fallback) {
     return [[KayokoPasteboardManager localizationBundle] localizedStringForKey:key value:fallback table:@"Tweak"];
@@ -414,21 +415,6 @@ NS_ASSUME_NONNULL_END
 
     for (NSDictionary<NSString *, id> *group in groups) {
         [[self groupsStackView] addArrangedSubview:[self headerForGroup:group]];
-
-        NSArray<NSDictionary<NSString *, id> *> *entries = group[@"entries"];
-        NSUInteger visible = MIN([entries count], kKayokoSummaryRowsPerGroup);
-        for (NSUInteger index = 0; index < visible; index++) {
-            [[self groupsStackView] addArrangedSubview:[self rowForEntry:entries[index]]];
-        }
-        if ([entries count] > visible) {
-            NSString *moreFormat = KayokoSummaryLocalized(@"Pasteboard Summary More", @"+ %lu more");
-            UILabel *moreLabel = [[UILabel alloc] init];
-            [moreLabel setText:[NSString stringWithFormat:moreFormat,
-                                                         (unsigned long)([entries count] - visible)]];
-            [moreLabel setFont:[UIFont systemFontOfSize:12]];
-            [moreLabel setTextColor:[UIColor tertiaryLabelColor]];
-            [[self groupsStackView] addArrangedSubview:moreLabel];
-        }
     }
 }
 
@@ -454,58 +440,27 @@ NS_ASSUME_NONNULL_END
     [badge setTextColor:[UIColor secondaryLabelColor]];
     [header addArrangedSubview:badge];
 
-    return header;
-}
-
-- (UIView *)rowForEntry:(NSDictionary<NSString *, id> *)entry {
-    UIStackView *row = [[UIStackView alloc] init];
-    [row setAxis:UILayoutConstraintAxisHorizontal];
-    [row setAlignment:UIStackViewAlignmentCenter];
-    [row setSpacing:8];
-
-    UIStackView *texts = [[UIStackView alloc] init];
-    [texts setAxis:UILayoutConstraintAxisVertical];
-    [texts setAlignment:UIStackViewAlignmentFill];
-    [texts setSpacing:2];
-    [row addArrangedSubview:texts];
-
-    NSString *preview = entry[@"preview"];
-    UILabel *previewLabel = [[UILabel alloc] init];
-    [previewLabel setText:[preview length] > 0
-                              ? preview
-                              : KayokoSummaryLocalized(@"Pasteboard Summary Untitled", @"(no preview)")];
-    [previewLabel setFont:[UIFont systemFontOfSize:12]];
-    [previewLabel setTextColor:[UIColor labelColor]];
-    [previewLabel setNumberOfLines:2];
-    [texts addArrangedSubview:previewLabel];
-
-    NSString *detail = entry[@"detail"];
-    if ([detail length] > 0) {
-        UILabel *detailLabel = [[UILabel alloc] init];
-        [detailLabel setText:detail];
-        [detailLabel setFont:[UIFont systemFontOfSize:11]];
-        [detailLabel setTextColor:[UIColor secondaryLabelColor]];
-        [detailLabel setNumberOfLines:1];
-        [texts addArrangedSubview:detailLabel];
-    }
-
     UIButton *deleteButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [deleteButton setImage:[UIImage systemImageNamed:@"trash.fill"] forState:UIControlStateNormal];
     [deleteButton setTintColor:[UIColor systemRedColor]];
-    [deleteButton setAccessibilityIdentifier:kKayokoSummaryDeleteTag];
-    [deleteButton setAccessibilityLabel:KayokoSummaryLocalized(@"Pasteboard Summary Delete", @"Delete")];
-    objc_setAssociatedObject(deleteButton, &kKayokoSummaryAssociatedItemKey, entry[@"item"],
+    [deleteButton setAccessibilityIdentifier:kKayokoSummaryCategoryDeleteTag];
+    [deleteButton setAccessibilityLabel:KayokoSummaryLocalized(@"Pasteboard Summary Delete Category",
+                                                               @"Delete all")];
+    // Associate the original history dictionaries (entry[@"item"]) so the owner
+    // can hand them straight to removeItemDictionary:.
+    objc_setAssociatedObject(deleteButton, &kKayokoSummaryAssociatedEntriesKey,
+                             [group[@"entries"] valueForKey:@"item"],
                              OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     [deleteButton addTarget:self
-                     action:@selector(handleDeleteButton:)
+                     action:@selector(handleDeleteCategory:)
            forControlEvents:UIControlEventTouchUpInside];
-    [row addArrangedSubview:deleteButton];
+    [header addArrangedSubview:deleteButton];
     [NSLayoutConstraint activateConstraints:@[
         [[deleteButton widthAnchor] constraintEqualToConstant:34],
         [[deleteButton heightAnchor] constraintEqualToConstant:34]
     ]];
 
-    return row;
+    return header;
 }
 
 #pragma mark - Presentation
@@ -562,24 +517,26 @@ NS_ASSUME_NONNULL_END
 
 #pragma mark - Actions
 
-- (void)handleDeleteButton:(UIButton *)button {
-    NSDictionary<NSString *, id> *item = objc_getAssociatedObject(button, &kKayokoSummaryAssociatedItemKey);
-    void (^handler)(NSDictionary<NSString *, id> *, KayokoSummaryDeleteCompletion) = [self deleteHandler];
-    if (![item isKindOfClass:[NSDictionary class]] || !handler) {
+- (void)handleDeleteCategory:(UIButton *)button {
+    NSArray<NSDictionary<NSString *, id> *> *entries =
+        objc_getAssociatedObject(button, &kKayokoSummaryAssociatedEntriesKey);
+    void (^handler)(NSArray<NSDictionary<NSString *, id> *> *, KayokoSummaryDeleteCompletion) =
+        [self deleteHandler];
+    if (![entries isKindOfClass:[NSArray class]] || [entries count] == 0 || !handler) {
         return;
     }
 
     [button setEnabled:NO];
     __weak typeof(self) weakSelf = self;
-    handler(item, ^(BOOL success, NSArray<NSDictionary<NSString *, id> *> *freshItems) {
+    handler(entries, ^(BOOL success, NSArray<NSDictionary<NSString *, id> *> *freshItems) {
       __strong typeof(weakSelf) strongSelf = weakSelf;
       if (!strongSelf) {
           return;
       }
       [button setEnabled:YES];
-      if (success) {
-          [strongSelf reloadWithItems:freshItems ?: @[]];
-      }
+      // The returned list is the source of truth - always reload, even if a
+      // duplicate-content row reported nothing removed.
+      [strongSelf reloadWithItems:freshItems ?: @[]];
     });
 }
 
