@@ -601,7 +601,7 @@ NS_ASSUME_NONNULL_END
           return;
       }
       NSArray<NSDictionary<NSString *, id> *> *safeItems = items ?: @[];
-      NSUInteger remaining = [safeItems count];
+      __block NSUInteger remaining = [safeItems count];
       if (remaining == 0) {
           completion(YES, [[strongSelf activeListViewController] items] ?: @[]);
           return;
