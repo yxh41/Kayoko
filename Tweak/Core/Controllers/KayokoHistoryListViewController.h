@@ -71,6 +71,11 @@ NS_ASSUME_NONNULL_BEGIN
                             limit:(NSUInteger)limit
                         animating:(BOOL)animating;
 - (void)removeItemDictionary:(NSDictionary<NSString *, id> *)dictionary;
+/// Removes a history row and reports the result after the table animation ends.
+/// 4.3.44: promoted from the class extension so the grabber summary's delete
+/// buttons can refresh themselves from the completion instead of guessing.
+- (void)removeItemDictionary:(NSDictionary<NSString *, id> *)dictionary
+                  completion:(nullable void (^)(BOOL success))completion;
 - (void)removeItemAtIndexPath:(NSIndexPath *)indexPath completion:(nullable void (^)(BOOL success))completion;
 - (void)updateTagUUID:(nullable NSString *)tagUUID forItem:(KayokoPasteboardItem *)item;
 - (void)updateNote:(nullable NSString *)note

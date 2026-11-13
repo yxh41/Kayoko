@@ -16,6 +16,9 @@ static NSString *const kKayokoSummaryBuildTag = @"KayokoPasteboardSummary-4.3.42
 static NSString *const kKayokoSummaryBreakdownTag = @"KayokoHistoryBreakdown-4.3.43";
 static NSString *const kKayokoSummaryHistoryGateTag = @"KayokoSummaryHistoryOnly-4.3.43";
 static NSString *const kKayokoSummaryDeleteTag = @"KayokoSummaryDeleteRow-4.3.43";
+/// 4.3.44: the delete buttons now call the public completion-bearing removal
+/// API, so the popover refreshes from the exact post-animation item list.
+static NSString *const kKayokoSummaryDeleteAPITag = @"KayokoSummaryDeletePublicAPI-4.3.44";
 static NSString *const kKayokoSummaryHintFallback =
     @"Long press the grabber to inspect the current pasteboard (4.3.42). Tap outside to close.";
 static char kKayokoSummaryAssociatedItemKey = 0;
@@ -338,6 +341,7 @@ NS_ASSUME_NONNULL_END
     [groupsStack setAlignment:UIStackViewAlignmentFill];
     [groupsStack setSpacing:12];
     [scrollView addSubview:groupsStack];
+    [groupsStack setAccessibilityIdentifier:kKayokoSummaryDeleteAPITag];
     [self setGroupsStackView:groupsStack];
     [groupsStack setTranslatesAutoresizingMaskIntoConstraints:NO];
     [NSLayoutConstraint activateConstraints:@[

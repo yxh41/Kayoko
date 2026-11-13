@@ -383,8 +383,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (KayokoTableViewCell *)newCellForItem:(KayokoPasteboardItem *)item addsPreviewGesture:(BOOL)addsPreviewGesture;
 - (void)loadThumbnailForItem:(KayokoPasteboardItem *)item intoCell:(KayokoTableViewCell *)cell;
 - (void)refreshVisibleItemDetails;
-- (void)removeItemDictionary:(NSDictionary<NSString *, id> *)dictionary
-                  completion:(nullable void (^)(BOOL success))completion;
+// 4.3.44: removeItemDictionary:completion: is declared in the public header
+// now; KayokoMainViewController uses it for the summary's delete callback.
 @end
 
 NS_ASSUME_NONNULL_END
